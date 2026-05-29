@@ -27,7 +27,7 @@ jwt = JWTManager(app)
 init_db()
 
 
-_DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://drive.google.com/file/d/1eql3Ax9Qe2V5HNgh5Ui86dIy9ZwtLqgN/view")
+_DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://www.mediafire.com/file/pancy7d0ypt7m85/%25D9%2588%25D8%25B1%25D8%25B4%25D8%25A9_%25D8%25B7%25D8%25A8%25D8%25A7%25D8%25B9%25D8%25A9.zip/file")
 
 
 @app.route("/")
