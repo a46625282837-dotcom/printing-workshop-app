@@ -1,7 +1,8 @@
 import logging
 import base64
 from datetime import date, timedelta
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
+import os
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, get_jwt_identity,
 )
@@ -24,6 +25,50 @@ app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=config.JWT_EXPIRY_HOURS
 jwt = JWTManager(app)
 
 init_db()
+
+
+_DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "#")
+
+
+@app.route("/")
+def landing():
+    return f"""<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ورشة طباعة</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:'Segoe UI',sans-serif;background:linear-gradient(135deg,#1a73e8,#0d47a1);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}}
+.card{{background:#fff;border-radius:20px;padding:50px;max-width:500px;width:100%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.3)}}
+h1{{color:#1a73e8;font-size:32px;margin-bottom:10px}}
+p{{color:#555;font-size:16px;line-height:1.8;margin-bottom:25px}}
+.btn{{display:inline-block;background:#1a73e8;color:#fff;padding:16px 40px;border-radius:50px;font-size:18px;text-decoration:none;transition:.3s}}
+.btn:hover{{background:#0d47a1;transform:translateY(-2px)}}
+.steps{{text-align:right;background:#f5f5f5;border-radius:12px;padding:20px;margin:25px 0;font-size:14px;color:#444}}
+.steps li{{margin-bottom:8px}}
+.footer{{color:#999;font-size:13px;margin-top:20px}}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>🖨️ ورشة طباعة</h1>
+<p>برنامج تصميم وطباعة البطاقات الشخصية<br>بأعلى جودة واحترافية</p>
+<div class="steps">
+<strong>طريقة التحميل:</strong>
+<ol>
+<li>حمل الملف من الرابط أدناه</li>
+<li>فك الضغط عن الملف</li>
+<li>شغّل <strong>ورشة طباعة.exe</strong></li>
+<li>سجل حساب جديد وابدأ الاستخدام</li>
+</ol>
+</div>
+<a class="btn" href="{_DOWNLOAD_URL}">📥 تحميل التطبيق</a>
+<p class="footer">للاشتراك والتواصل: <strong>07865402819</strong> واتساب</p>
+</div>
+</body>
+</html>"""
 
 
 @app.route("/api/auth/login", methods=["POST"])
