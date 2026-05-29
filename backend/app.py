@@ -27,7 +27,7 @@ jwt = JWTManager(app)
 init_db()
 
 
-_DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://drive.google.com/uc?export=download&id=1eql3Ax9Qe2V5HNgh5Ui86dIy9ZwtLqgN")
+_DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://drive.google.com/file/d/1eql3Ax9Qe2V5HNgh5Ui86dIy9ZwtLqgN/view")
 
 
 @app.route("/")
