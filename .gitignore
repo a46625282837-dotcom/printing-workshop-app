@@ -1,0 +1,9 @@
+﻿data/
+backend/data/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+.vs/
+*.log
