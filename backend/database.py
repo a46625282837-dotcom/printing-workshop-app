@@ -1,18 +1,68 @@
-import sqlite3
 import os
+import sqlite3
 import logging
-from datetime import date, timedelta
+from datetime import date
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-DB_PATH = os.path.join(DATA_DIR, "backend.db")
+_DB_URL = os.environ.get("DATABASE_URL")
+_is_pg = bool(_DB_URL)
+
+PLACEHOLDER = "%s" if _is_pg else "?"
+SERIAL_TYPE = "SERIAL" if _is_pg else "INTEGER"
+BLOB_TYPE = "BYTEA" if _is_pg else "BLOB"
+REF_CLAUSE = "REFERENCES users(username) ON DELETE CASCADE"
+INSERT_OR_REPLACE = "INSERT INTO" if _is_pg else "INSERT OR REPLACE INTO"
+
+
+def _q(sql):
+    """Convert SQL placeholders if needed."""
+    return sql.replace("%s", "?") if not _is_pg else sql
+
+
+def _binary(val):
+    if val is None:
+        return None
+    if _is_pg:
+        import psycopg2
+        return psycopg2.Binary(val)
+    return sqlite3.Binary(val)
+
+
+def _to_bytes(val):
+    if val is None:
+        return None
+    if isinstance(val, memoryview):
+        return bytes(val)
+    if isinstance(val, bytes):
+        return val
+    return bytes(val)
+
+
+def _dict_row(cur, row):
+    if row is None:
+        return None
+    cols = [d[0] for d in cur.description]
+    return dict(zip(cols, row))
+
+
+def _conn():
+    if _is_pg:
+        import psycopg2
+        return psycopg2.connect(_DB_URL)
+    _data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(_data_dir, exist_ok=True)
+    _db_path = os.path.join(_data_dir, "backend.db")
+    conn = sqlite3.connect(_db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
 
 
 def init_db():
-    os.makedirs(DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q(f"""
         CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY,
             password TEXT NOT NULL,
@@ -21,126 +71,141 @@ def init_db():
             reg_date TEXT NOT NULL,
             is_admin INTEGER DEFAULT 0
         )
-    """)
-    conn.execute("""
+    """))
+    cur.execute(_q(f"""
         CREATE TABLE IF NOT EXISTS subscriptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
+            id {SERIAL_TYPE} PRIMARY KEY,
+            username TEXT NOT NULL {REF_CLAUSE},
             start_date TEXT NOT NULL,
             end_date TEXT NOT NULL,
-            days INTEGER NOT NULL,
-            FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+            days INTEGER NOT NULL
         )
-    """)
-    conn.execute("""
+    """))
+    cur.execute(_q(f"""
         CREATE TABLE IF NOT EXISTS pending_subs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
-            message TEXT NOT NULL,
-            FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+            id {SERIAL_TYPE} PRIMARY KEY,
+            username TEXT NOT NULL {REF_CLAUSE},
+            message TEXT NOT NULL
         )
-    """)
-    conn.execute("""
+    """))
+    cur.execute(_q(f"""
         CREATE TABLE IF NOT EXISTS profile_pixmaps (
-            username TEXT PRIMARY KEY,
-            pixmap BLOB,
-            FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+            username TEXT PRIMARY KEY {REF_CLAUSE},
+            pixmap {BLOB_TYPE}
         )
-    """)
-    conn.execute("""
+    """))
+    cur.execute(_q(f"""
         CREATE TABLE IF NOT EXISTS banner_pixmaps (
-            side TEXT,
-            pixmap BLOB,
-            link TEXT DEFAULT '',
-            PRIMARY KEY (side)
+            side TEXT PRIMARY KEY,
+            pixmap {BLOB_TYPE},
+            link TEXT DEFAULT ''
         )
-    """)
-    _ensure_admin(conn)
+    """))
+    _ensure_admin(conn, cur)
     conn.commit()
+    cur.close()
     conn.close()
-    logger.info("Backend DB initialized: %s", DB_PATH)
+    logger.info("Backend DB initialized (%s)", "PostgreSQL" if _is_pg else "SQLite")
 
 
-def _ensure_admin(conn):
+def _ensure_admin(conn, cur):
     import bcrypt
-    row = conn.execute("SELECT username FROM users WHERE username = 'ahmed'").fetchone()
+    cur.execute(_q("SELECT username FROM users WHERE username = %s"), ("ahmed",))
+    row = cur.fetchone()
     if not row:
         hashed = bcrypt.hashpw(b"Aa511F511fa", bcrypt.gensalt()).decode()
-        conn.execute(
-            "INSERT INTO users (username, password, shop_name, reg_date, is_admin) VALUES (?, ?, ?, ?, ?)",
+        cur.execute(
+            _q("INSERT INTO users (username, password, shop_name, reg_date, is_admin) VALUES (%s, %s, %s, %s, %s)"),
             ("ahmed", hashed, "المالك", date.today().isoformat(), 1),
         )
         logger.info("Admin account created")
 
 
 def get_user(username):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("SELECT * FROM users WHERE username = %s"), (username,))
+    row = cur.fetchone()
+    result = _dict_row(cur, row)
+    cur.close()
     conn.close()
-    if row:
-        return dict(row)
-    return None
+    return result
 
 
 def get_all_users():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT username, shop_name, phone, reg_date, is_admin FROM users ORDER BY reg_date"
-    ).fetchall()
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q("SELECT username, shop_name, phone, reg_date, is_admin FROM users ORDER BY reg_date")
+    )
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description]
+    result = [dict(zip(cols, r)) for r in rows]
+    cur.close()
     conn.close()
-    return [dict(r) for r in rows]
+    return result
 
 
 def create_user(username, password, shop_name, phone):
     import bcrypt
-    conn = sqlite3.connect(DB_PATH)
+    conn = _conn()
+    cur = conn.cursor()
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
     try:
-        conn.execute(
-            "INSERT INTO users (username, password, shop_name, phone, reg_date, is_admin) VALUES (?, ?, ?, ?, ?, 0)",
+        cur.execute(
+            _q("INSERT INTO users (username, password, shop_name, phone, reg_date, is_admin) VALUES (%s, %s, %s, %s, %s, 0)"),
             (username, hashed, shop_name, phone, date.today().isoformat()),
         )
         conn.commit()
         return True
-    except sqlite3.IntegrityError:
+    except Exception:
+        conn.rollback()
         return False
     finally:
+        cur.close()
         conn.close()
 
 
 def update_password(username, new_password):
     import bcrypt
     hashed = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE users SET password = ? WHERE username = ?", (hashed, username))
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("UPDATE users SET password = %s WHERE username = %s"), (hashed, username))
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def update_profile(username, shop_name, phone):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE users SET shop_name = ?, phone = ? WHERE username = ?",
-                 (shop_name, phone, username))
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("UPDATE users SET shop_name = %s, phone = %s WHERE username = %s"),
+                (shop_name, phone, username))
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def delete_user(username):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("DELETE FROM pending_subs WHERE username = ?", (username,))
-    conn.execute("DELETE FROM subscriptions WHERE username = ?", (username,))
-    conn.execute("DELETE FROM profile_pixmaps WHERE username = ?", (username,))
-    conn.execute("DELETE FROM users WHERE username = ?", (username,))
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("DELETE FROM pending_subs WHERE username = %s"), (username,))
+    cur.execute(_q("DELETE FROM subscriptions WHERE username = %s"), (username,))
+    cur.execute(_q("DELETE FROM profile_pixmaps WHERE username = %s"), (username,))
+    cur.execute(_q("DELETE FROM users WHERE username = %s"), (username,))
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def verify_password(username, password):
     import bcrypt
-    conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("SELECT password FROM users WHERE username = ?", (username,)).fetchone()
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("SELECT password FROM users WHERE username = %s"), (username,))
+    row = cur.fetchone()
+    cur.close()
     conn.close()
     if not row:
         return False
@@ -148,33 +213,40 @@ def verify_password(username, password):
 
 
 def get_subscriptions(username):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT start_date, end_date, days FROM subscriptions WHERE username = ? ORDER BY start_date",
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q("SELECT start_date, end_date, days FROM subscriptions WHERE username = %s ORDER BY start_date"),
         (username,),
-    ).fetchall()
+    )
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
-    return [dict(r) for r in rows]
+    return [{"start_date": r[0], "end_date": r[1], "days": r[2]} for r in rows]
 
 
 def add_subscription(username, start_date, end_date, days):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "INSERT INTO subscriptions (username, start_date, end_date, days) VALUES (?, ?, ?, ?)",
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q("INSERT INTO subscriptions (username, start_date, end_date, days) VALUES (%s, %s, %s, %s)"),
         (username, start_date, end_date, days),
     )
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def compute_remaining_days(username):
     today = date.today().isoformat()
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        "SELECT end_date FROM subscriptions WHERE username = ? AND end_date >= ?",
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q("SELECT end_date FROM subscriptions WHERE username = %s AND end_date >= %s"),
         (username, today),
-    ).fetchall()
+    )
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     total = 0
     for (end_str,) in rows:
@@ -186,76 +258,106 @@ def compute_remaining_days(username):
 
 
 def get_pending_messages(username):
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        "SELECT message FROM pending_subs WHERE username = ?", (username,)
-    ).fetchall()
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q("SELECT message FROM pending_subs WHERE username = %s"), (username,)
+    )
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     return [r[0] for r in rows]
 
 
 def add_pending_message(username, message):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "INSERT INTO pending_subs (username, message) VALUES (?, ?)",
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q("INSERT INTO pending_subs (username, message) VALUES (%s, %s)"),
         (username, message),
     )
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def clear_pending(username):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("DELETE FROM pending_subs WHERE username = ?", (username,))
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("DELETE FROM pending_subs WHERE username = %s"), (username,))
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def save_profile_pixmap(username, pixmap_bytes):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "INSERT OR REPLACE INTO profile_pixmaps (username, pixmap) VALUES (?, ?)",
-        (username, sqlite3.Binary(pixmap_bytes) if pixmap_bytes else None),
-    )
+    conn = _conn()
+    cur = conn.cursor()
+    if _is_pg:
+        cur.execute(
+            _q("INSERT INTO profile_pixmaps (username, pixmap) VALUES (%s, %s) ON CONFLICT (username) DO UPDATE SET pixmap = EXCLUDED.pixmap"),
+            (username, _binary(pixmap_bytes)),
+        )
+    else:
+        cur.execute(
+            _q("INSERT OR REPLACE INTO profile_pixmaps (username, pixmap) VALUES (%s, %s)"),
+            (username, _binary(pixmap_bytes)),
+        )
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def get_profile_pixmap(username):
-    conn = sqlite3.connect(DB_PATH)
-    row = conn.execute(
-        "SELECT pixmap FROM profile_pixmaps WHERE username = ?", (username,)
-    ).fetchone()
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q("SELECT pixmap FROM profile_pixmaps WHERE username = %s"), (username,)
+    )
+    row = cur.fetchone()
+    cur.close()
     conn.close()
-    return bytes(row[0]) if row and row[0] else None
+    return _to_bytes(row[0]) if row and row[0] else None
 
 
 def save_banner_pixmap(side, pixmap_bytes, link=""):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "INSERT OR REPLACE INTO banner_pixmaps (side, pixmap, link) VALUES (?, ?, ?)",
-        (side, sqlite3.Binary(pixmap_bytes) if pixmap_bytes else None, link),
-    )
+    conn = _conn()
+    cur = conn.cursor()
+    if _is_pg:
+        cur.execute(
+            _q("INSERT INTO banner_pixmaps (side, pixmap, link) VALUES (%s, %s, %s) ON CONFLICT (side) DO UPDATE SET pixmap = EXCLUDED.pixmap, link = EXCLUDED.link"),
+            (side, _binary(pixmap_bytes), link),
+        )
+    else:
+        cur.execute(
+            _q("INSERT OR REPLACE INTO banner_pixmaps (side, pixmap, link) VALUES (%s, %s, %s)"),
+            (side, _binary(pixmap_bytes), link),
+        )
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def get_banner_pixmaps():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute("SELECT * FROM banner_pixmaps").fetchall()
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("SELECT * FROM banner_pixmaps"))
+    rows = cur.fetchall()
+    cur.close()
     conn.close()
     result = {}
     for r in rows:
-        result[r["side"]] = {
-            "pixmap": bytes(r["pixmap"]) if r["pixmap"] else None,
-            "link": r["link"],
+        result[r[0]] = {
+            "pixmap": _to_bytes(r[1]),
+            "link": r[2] if r[2] else "",
         }
     return result
 
 
 def delete_banner_pixmap(side):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("DELETE FROM banner_pixmaps WHERE side = ?", (side,))
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("DELETE FROM banner_pixmaps WHERE side = %s"), (side,))
     conn.commit()
+    cur.close()
     conn.close()

@@ -3,3 +3,4 @@ flask-jwt-extended>=4.7
 bcrypt>=4.3
 requests>=2.32
 gunicorn>=23.0
+psycopg2-binary>=2.9
