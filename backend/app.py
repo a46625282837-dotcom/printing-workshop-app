@@ -145,7 +145,7 @@ def api_get_users():
             continue
         remaining = compute_remaining_days(u["username"])
         subs = get_subscriptions(u["username"])
-        latest = subs[-1]["start"] if subs else None
+        latest = subs[-1]["start_date"] if subs else None
         result.append({
             "username": u["username"],
             "shop_name": u["shop_name"],
