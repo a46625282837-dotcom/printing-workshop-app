@@ -967,13 +967,14 @@ class MainWindow(QMainWindow):
             return True
         if self._username in self._users:
             user = self._users[self._username]
-            remaining = user.get("section_trials", {}).get(section, 3)
+            trials = user.setdefault("section_trials", {})
+            remaining = trials.get(section, 3)
             if remaining <= 0:
                 QMessageBox.warning(self, "تنبيه",
                     "انتهت مرات التجربة لهذا القسم. يرجى التواصل مع المالك.")
                 logger.warning("انتهت تجارب القسم %s للمستخدم %s", section, self._username)
                 return False
-            user["section_trials"][section] = remaining - 1
+            trials[section] = remaining - 1
             logger.info("تجربة قسم %s للمستخدم %s: %d متبقية", section, self._username, remaining - 1)
         return True
 

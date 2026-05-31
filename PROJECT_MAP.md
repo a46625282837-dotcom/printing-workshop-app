@@ -93,7 +93,9 @@ idcard_app/
 - Development (non-frozen): reads `data/app_config.json` from source tree, falls back to env vars, then `http://localhost:5000`
 
 ## Subscription UX
-- `_NO_SUB_MSG` constant in `ui/main_window.py` defines the message shown when subscription is expired (section access + print/save)
+- Subscription only blocks PRINT and SAVE operations, NOT section access
+- `_NO_SUB_MSG` in `ui/main_window.py` shown by `_require_subscription()` for print/save
+- `_check_section_access()` always returns True — users can open sections freely
 - Current message: `"يجب أن تشترك قبل الاستخدام. تواصل مع المالك: واتساب 07865402819"`
 - Update `_NO_SUB_MSG` to change the contact number or message
 
