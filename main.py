@@ -12,23 +12,21 @@ logging.basicConfig(
 )
 
 
-def _data_dir():
+_SERVER_URL = "https://printing-workshop-api.onrender.com"
+
+
+def _frozen_path():
     if getattr(sys, "frozen", False):
-        meipass = getattr(sys, "_MEIPASS", "")
-        if meipass:
-            bundled = os.path.join(meipass, "data")
-            if os.path.exists(bundled):
-                return bundled
-        return os.path.join(os.path.dirname(sys.executable), "data")
-    return os.path.join(os.path.dirname(__file__), "data")
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return os.path.dirname(__file__)
 
 
-def _config_path():
-    return os.path.join(_data_dir(), "app_config.json")
+def _data_dir():
+    return os.path.join(_frozen_path(), "data")
 
 
 def _load_config():
-    path = _config_path()
+    path = os.path.join(_data_dir(), "app_config.json")
     if os.path.exists(path):
         try:
             with open(path, encoding="utf-8") as f:
@@ -38,28 +36,22 @@ def _load_config():
     return {}
 
 
-def _save_config(cfg):
-    path = _config_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logging.warning("فشل حفظ الإعدادات: %s", e)
-
-
 def _icon_path():
-    if getattr(sys, "frozen", False):
-        return os.path.join(sys._MEIPASS, "i1.ico")
-    return os.path.join(os.path.dirname(__file__), "i1.ico")
+    return os.path.join(_frozen_path(), "i1.ico")
 
 
 def main():
-    cfg = _load_config()
-    use_api = cfg.get("api_mode", False) or os.environ.get("IDCARD_API_MODE", "").lower() in ("1", "true", "yes")
+    frozen = getattr(sys, "frozen", False)
+    if frozen:
+        use_api = True
+        cfg = _load_config()
+        server_url = cfg.get("server_url", _SERVER_URL)
+    else:
+        cfg = _load_config()
+        use_api = cfg.get("api_mode", False) or os.environ.get("IDCARD_API_MODE", "").lower() in ("1", "true", "yes")
+        server_url = cfg.get("server_url") or os.environ.get("IDCARD_SERVER_URL", "http://localhost:5000")
     if use_api:
         from core import api_client
-        server_url = cfg.get("server_url") or os.environ.get("IDCARD_SERVER_URL", "http://localhost:5000")
         api_client.set_server_url(server_url)
         logging.info("API mode enabled: %s", server_url)
     app = QApplication(sys.argv)
