@@ -29,7 +29,7 @@ def _load_config():
     path = os.path.join(_data_dir(), "app_config.json")
     if os.path.exists(path):
         try:
-            with open(path, encoding="utf-8") as f:
+            with open(path, encoding="utf-8-sig") as f:
                 return json.load(f)
         except Exception as e:
             logging.warning("فشل قراءة الإعدادات: %s", e)
