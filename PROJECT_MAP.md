@@ -71,8 +71,21 @@ idcard_app/
 - No self-service subscription endpoint exists (admin only via dashboard)
 
 ## Known Issues
-- `ahmed` login only works via API mode (requires running backend server + `data/app_config.json` with `api_mode: true`)
+- `ahmed` login only works via API mode (requires running backend server)
 - Local mode removed `ahmed` special case to avoid KeyError — admin must log in through the server
+
+## Single-Session (One Device Per Account)
+- Backend stores `token_id` in `users.token_id` column (UUID generated on each login)
+- JWT includes `tid` claim; `token_in_blocklist_loader` checks it against DB on every request
+- If a new login occurs, old JWT becomes invalid → API returns `401 {"session_expired": true, "error": "الحساب شغال في لابتوب آخر"}`
+- Client-side `api_client._request()` detects `session_expired`, clears token, invokes callback
+- UI callback shows warning dialog and forces logout
+
+## Responsive UI
+- Window size: 85% of screen (capped at 1400x900)
+- Scale factor based on screen resolution relative to 1366x768 (capped at 1.5x)
+- Banner sizes (`_banner_w`, `_banner_h`): 240x320 scaled by factor
+- Banner pixmap rendering: `(self._banner_w - 10, self._banner_h - 10)`
 
 ## Frozen (EXE) Behavior
 - When running as frozen exe: **always uses API mode** with hardcoded `_SERVER_URL = "https://printing-workshop-api.onrender.com"`
