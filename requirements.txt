@@ -1,0 +1,8 @@
+PySide6>=6.11.1
+Pillow>=12.2.0
+opencv-python>=4.11.0
+rembg>=1.0.0
+PyMuPDF>=1.27.0
+reportlab>=4.5.0
+pdf2docx>=1.0.0
+pywhatkit>=5.4

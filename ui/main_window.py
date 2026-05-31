@@ -929,20 +929,6 @@ class MainWindow(QMainWindow):
         return True
 
     def _check_section_access(self):
-        if self._is_admin:
-            return True
-        if self._use_api:
-            if self._compute_subscription_days() <= 0:
-                QMessageBox.warning(self, "تنبيه", _NO_SUB_MSG)
-                logger.warning("محاولة دخول قسم مع اشتراك منتهي: %s", self._username)
-                return False
-            return True
-        if self._username in self._users:
-            user = self._users[self._username]
-            if self._compute_subscription_days(user) <= 0:
-                QMessageBox.warning(self, "تنبيه", _NO_SUB_MSG)
-                logger.warning("محاولة دخول قسم مع اشتراك منتهي: %s", self._username)
-                return False
         return True
 
     def _show_subscription_warning(self):
