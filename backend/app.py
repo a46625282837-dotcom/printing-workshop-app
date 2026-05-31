@@ -1,10 +1,12 @@
 import logging
 import base64
+import uuid
 from datetime import date, timedelta
 from flask import Flask, request, jsonify, send_from_directory
 import os
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, get_jwt_identity,
+    get_jwt,
 )
 from . import config
 from .database import (
@@ -14,6 +16,7 @@ from .database import (
     get_pending_messages, add_pending_message, clear_pending,
     save_profile_pixmap, get_profile_pixmap,
     save_banner_pixmap, get_banner_pixmaps, delete_banner_pixmap,
+    update_token_id,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -23,6 +26,24 @@ app = Flask(__name__)
 app.config["JWT_SECRET_KEY"] = config.JWT_SECRET
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=config.JWT_EXPIRY_HOURS)
 jwt = JWTManager(app)
+
+
+@jwt.token_in_blocklist_loader
+def _session_check(jwt_header, jwt_payload):
+    username = jwt_payload.get("sub")
+    token_id = jwt_payload.get("tid")
+    if not username or not token_id:
+        return True
+    user = get_user(username)
+    if not user:
+        return True
+    return user.get("token_id", "") != token_id
+
+
+@jwt.revoked_token_loader
+def _session_expired(jwt_header, jwt_payload):
+    return jsonify({"error": "الحساب شغال في لابتوب آخر", "session_expired": True}), 401
+
 
 init_db()
 
@@ -81,7 +102,9 @@ def api_login():
     if not verify_password(username, password):
         return jsonify({"error": "اسم المستخدم أو كلمة المرور غير صحيحة"}), 401
     user = get_user(username)
-    token = create_access_token(identity=username)
+    token_id = str(uuid.uuid4())
+    update_token_id(username, token_id)
+    token = create_access_token(identity=username, additional_claims={"tid": token_id})
     return jsonify({
         "token": token,
         "username": username,
@@ -105,7 +128,9 @@ def api_register():
     if username.lower() == "ahmed":
         return jsonify({"error": "لا يمكن استخدام هذا الاسم"}), 400
     if create_user(username, password, shop_name, phone):
-        token = create_access_token(identity=username)
+        token_id = str(uuid.uuid4())
+        update_token_id(username, token_id)
+        token = create_access_token(identity=username, additional_claims={"tid": token_id})
         return jsonify({"token": token, "username": username}), 201
     return jsonify({"error": "اسم المستخدم موجود مسبقاً"}), 409
 

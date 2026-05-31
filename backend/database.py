@@ -69,7 +69,8 @@ def init_db():
             shop_name TEXT DEFAULT '',
             phone TEXT DEFAULT '',
             reg_date TEXT NOT NULL,
-            is_admin INTEGER DEFAULT 0
+            is_admin INTEGER DEFAULT 0,
+            token_id TEXT DEFAULT ''
         )
     """))
     cur.execute(_q(f"""
@@ -101,6 +102,13 @@ def init_db():
             link TEXT DEFAULT ''
         )
     """))
+    try:
+        if _is_pg:
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS token_id TEXT DEFAULT ''")
+        else:
+            cur.execute("ALTER TABLE users ADD COLUMN token_id TEXT DEFAULT ''")
+    except Exception:
+        pass
     _ensure_admin(conn, cur)
     conn.commit()
     cur.close()
@@ -130,6 +138,15 @@ def get_user(username):
     cur.close()
     conn.close()
     return result
+
+
+def update_token_id(username, token_id):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("UPDATE users SET token_id = %s WHERE username = %s"), (token_id, username))
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
 def get_all_users():
