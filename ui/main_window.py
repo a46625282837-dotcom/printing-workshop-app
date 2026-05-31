@@ -985,7 +985,8 @@ class MainWindow(QMainWindow):
         self._require_auth(lambda: self._check_section_access() and self._check_trial("photo") and self._open_photo_editor())
 
     def open_pdf_editor(self):
-        self._require_auth(lambda: self._check_section_access() and self._check_trial("pdf") and self._open_pdf_editor())
+        QMessageBox.information(self, "تنبيه", "قسم تحرير PDF قيد الصيانة حاليًا. سيتم تفعيله قريبًا.")
+        logger.info("محاولة فتح PDF editor - معطل للصيانة")
 
     def _open_id_editor(self):
         self._stack.setCurrentIndex(1)
