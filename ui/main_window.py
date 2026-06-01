@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
                                QPushButton, QLabel, QHBoxLayout,
                                QStackedWidget, QLineEdit, QMessageBox,
@@ -14,6 +15,10 @@ from datetime import date, timedelta
 from ui.a4_editor import A4Editor
 from ui.photo_editor import PhotoEditor
 from ui.pdf_editor import PdfEditor
+
+def _img_path(rel):
+    base = getattr(sys, '_MEIPASS', os.path.join(os.path.dirname(__file__), '..'))
+    return os.path.join(base, 'img', rel)
 
 IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff'}
 _NO_SUB_MSG = "يجب أن تشترك قبل الاستخدام. تواصل مع المالك: واتساب 07865402819"
@@ -236,7 +241,7 @@ class MainWindow(QMainWindow):
     def _build_main_screen(self):
         widget = QWidget()
         widget.setObjectName("mainScreen")
-        img_path = os.path.join(os.path.dirname(__file__), '..', '..', 'img', 'i5.jpeg').replace('\\', '/')
+        img_path = _img_path('i5.jpeg').replace('\\', '/')
         if os.path.exists(img_path):
             widget.setStyleSheet(f"""
                 QWidget#mainScreen {{
@@ -331,17 +336,17 @@ class MainWindow(QMainWindow):
         btn_row.setSpacing(40)
 
         btn_id = PlusButton("", "ترتيب وطباعة بطاقات الهوية", self.open_id_editor)
-        btn_id.setIcon(QIcon(r"G:\hp\Documents\pro\img\i2.jpeg"))
+        btn_id.setIcon(QIcon(_img_path('i2.jpeg')))
         btn_id.setIconSize(btn_id.size())
         _make_card("بطاقات الهوية", btn_id, btn_row)
 
         btn_photo = PlusButton("", "قص وطباعة صور شخصية", self.open_photo_editor)
-        btn_photo.setIcon(QIcon(r"G:\hp\Documents\pro\img\i3.jpeg"))
+        btn_photo.setIcon(QIcon(_img_path('i3.jpeg')))
         btn_photo.setIconSize(btn_photo.size())
         _make_card("صور شخصية", btn_photo, btn_row)
 
         btn_future2 = PlusButton("", "تحرير ملفات PDF", self.open_pdf_editor)
-        btn_future2.setIcon(QIcon(r"G:\hp\Documents\pro\img\i4.jpeg"))
+        btn_future2.setIcon(QIcon(_img_path('i4.jpeg')))
         btn_future2.setIconSize(btn_future2.size())
         _make_card("تحرير PDF", btn_future2, btn_row)
 
@@ -427,7 +432,7 @@ class MainWindow(QMainWindow):
                 border-radius: 14px;
             }
         """)
-        img_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'img')
+        img_dir = os.path.join(sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.dirname(os.path.dirname(__file__)), 'img')
         box_layout = QVBoxLayout(box)
         box_layout.setContentsMargins(20, 16, 20, 16)
         box_layout.setSpacing(10)
