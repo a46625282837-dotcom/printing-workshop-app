@@ -238,6 +238,9 @@ class MainWindow(QMainWindow):
         if not use_api:
             self._update_banners()
 
+        if use_api:
+            self._try_restore_session()
+
     def _build_main_screen(self):
         widget = QWidget()
         widget.setObjectName("mainScreen")
@@ -616,7 +619,75 @@ class MainWindow(QMainWindow):
         widget.setStyleSheet("#registerPage { background: #cceeff; }")
         return widget
 
+    def _session_path(self):
+        from core.database import DATA_DIR
+        return os.path.join(DATA_DIR, "session.json")
+
+    def _save_session(self):
+        from core import api_client
+        token = api_client.get_token()
+        if not token:
+            return
+        import json
+        with open(self._session_path(), "w", encoding="utf-8") as f:
+            json.dump({
+                "token": token,
+                "username": self._username,
+                "display_name": self._display_name,
+                "is_admin": self._is_admin,
+            }, f)
+
+    def _clear_session(self):
+        p = self._session_path()
+        if os.path.exists(p):
+            os.remove(p)
+
+    def _try_restore_session(self):
+        p = self._session_path()
+        if not os.path.exists(p):
+            return False
+        import json
+        try:
+            with open(p, encoding="utf-8") as f:
+                sess = json.load(f)
+        except Exception:
+            self._clear_session()
+            return False
+        token = sess.get("token")
+        username = sess.get("username")
+        if not token or not username:
+            self._clear_session()
+            return False
+        from core import api_client
+        api_client.set_token(token)
+        api_client.set_username(username)
+        from core.database import api_check_auth
+        qdata, qerr = api_check_auth()
+        if qerr:
+            self._clear_session()
+            return False
+        self._logged_in = True
+        self._username = username
+        self._display_name = sess.get("display_name", username)
+        self._is_admin = sess.get("is_admin", False)
+        self._api_data = qdata
+        self._update_auth_ui()
+        self._switch_to_main()
+        if self._is_admin:
+            self._update_banners()
+        if not self._is_admin:
+            pend = qdata.get("pending_messages", [])
+            if pend:
+                rem = qdata.get("remaining_days", 0)
+                QMessageBox.information(self, "تم التجديد",
+                    f"تم زيادة عدد أيام اشتراكك وأصبحت {rem} يوم")
+                from core.database import api_clear_pending
+                api_clear_pending()
+        logger.info("استعادة جلسة سابقة: %s", username)
+        return True
+
     def _on_session_expired(self):
+        self._clear_session()
         self._logged_in = False
         self._username = ""
         self._is_admin = False
@@ -656,6 +727,7 @@ class MainWindow(QMainWindow):
                     QMessageBox.information(self, "تم التجديد",
                         f"تم زيادة عدد أيام اشتراكك وأصبحت {rem} يوم")
                     api_clear_pending()
+            self._save_session()
             logger.info("تسجيل دخول API: %s", username)
             return
         if username not in self._users:
@@ -720,6 +792,7 @@ class MainWindow(QMainWindow):
                 self._api_data = qdata
             self._update_auth_ui()
             self._switch_to_main()
+            self._save_session()
             logger.info("تم تسجيل مستخدم API: %s", rdata["username"])
             return
         if data["english_name"] in self._users:
@@ -934,6 +1007,22 @@ class MainWindow(QMainWindow):
         return True
 
     def _check_section_access(self):
+        if self._is_admin:
+            return True
+        if self._use_api:
+            remaining = self._compute_subscription_days()
+            if remaining <= 0:
+                QMessageBox.warning(self, "تنبيه", _NO_SUB_MSG)
+                logger.warning("محاولة دخول قسم مع اشتراك منتهي: %s", self._username)
+                return False
+            return True
+        if self._username in self._users:
+            user = self._users[self._username]
+            remaining = self._compute_subscription_days(user)
+            if remaining <= 0:
+                QMessageBox.warning(self, "تنبيه", _NO_SUB_MSG)
+                logger.warning("محاولة دخول قسم مع اشتراك منتهي: %s", self._username)
+                return False
         return True
 
     def _show_subscription_warning(self):
@@ -2006,6 +2095,9 @@ class MainWindow(QMainWindow):
         self._username = ""
         self._display_name = ""
         self._is_admin = False
+        self._clear_session()
+        from core import api_client
+        api_client.set_token(None)
         self._switch_to_main()
         logger.info("تم تسجيل الخروج")
 
