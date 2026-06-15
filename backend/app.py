@@ -48,7 +48,7 @@ def _session_expired(jwt_header, jwt_payload):
 init_db()
 
 
-_DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://www.mediafire.com/file/49ctaybls47t7gs/%D9%88%D8%B1%D8%B4%D8%A9+%D8%B7%D8%A8%D8%A7%D8%B9%D8%A9.exe/file")
+_DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://www.mediafire.com/file/s047irkhot6lwhc/%D9%88%D8%B1%D8%B4%D8%A9+%D8%B7%D8%A8%D8%A7%D8%B9%D8%A9.exe/file")
 
 
 @app.route("/")
