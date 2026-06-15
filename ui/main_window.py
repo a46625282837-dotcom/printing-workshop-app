@@ -1331,38 +1331,38 @@ class MainWindow(QMainWindow):
         shop_name = eng_name
         if not self._use_api and eng_name in self._users:
             shop_name = self._users[eng_name].get('shop_name', eng_name)
-        days, ok = QInputDialog.getText(self, "زيادة أيام الاشتراك",
-            f"أدخل عدد الأيام للإضافة للمستخدم {shop_name}:")
+        days, ok = QInputDialog.getText(self, "تعيين أيام الاشتراك",
+            f"أدخل عدد أيام الاشتراك للمستخدم {shop_name} (0 = إلغاء الاشتراك):")
         if ok and days.strip().isdigit():
             d = int(days.strip())
-            if d <= 0:
-                QMessageBox.warning(self, "تنبيه", "يرجى إدخال رقم صحيح أكبر من صفر")
+            if d < 0:
+                QMessageBox.warning(self, "تنبيه", "يرجى إدخال رقم صحيح")
                 return
             if self._use_api:
-                from core.database import api_add_subscription
-                rdata, err = api_add_subscription(eng_name, d)
+                from core.database import api_set_subscription
+                rdata, err = api_set_subscription(eng_name, d)
                 if err:
                     QMessageBox.warning(self, "خطأ", err)
                     return
-                QMessageBox.information(self, "تم", f"تمت إضافة {d} أيام للمستخدم {shop_name}")
+                QMessageBox.information(self, "تم", f"تم تعيين {d} أيام للمستخدم {shop_name}")
                 self._refresh_dashboard()
-                logger.info("تمت إضافة %d أيام للمستخدم %s (API)", d, eng_name)
+                logger.info("تم تعيين %d أيام للمستخدم %s (API)", d, eng_name)
                 return
             user = self._users[eng_name]
             today = date.today()
-            start = today.strftime("%Y-%m-%d")
-            end = (today + timedelta(days=d)).strftime("%Y-%m-%d")
-            from core.database import add_subscription, add_pending_message
-            add_subscription(eng_name, start, end, d)
-            add_pending_message(eng_name,
-                f"تم زيادة اشتراكك {d} يوم من {start} إلى {end}")
-            user.setdefault("subscriptions", []).append({"start": start, "end": end, "days": d})
+            user.setdefault("subscriptions", [])
+            user["subscriptions"].clear()
+            if d > 0:
+                start = today.strftime("%Y-%m-%d")
+                end = (today + timedelta(days=d)).strftime("%Y-%m-%d")
+                from core.database import add_subscription, add_pending_message
+                add_subscription(eng_name, start, end, d)
+                add_pending_message(eng_name, f"تم تعيين اشتراكك {d} يوم")
+                user["subscriptions"].append({"start": start, "end": end, "days": d})
             user["subscription_days"] = self._compute_subscription_days(user)
-            user.setdefault("pending_subs", []).append(
-                {"days": d, "start": start, "end": end})
-            QMessageBox.information(self, "تم", f"تمت إضافة {d} أيام للمستخدم {user.get('shop_name', eng_name)}")
+            QMessageBox.information(self, "تم", f"تم تعيين {d} أيام للمستخدم {user.get('shop_name', eng_name)}")
             self._refresh_dashboard()
-            logger.info("تمت إضافة %d أيام للمستخدم %s", d, eng_name)
+            logger.info("تم تعيين %d أيام للمستخدم %s", d, eng_name)
 
     def _dashboard_reset_password(self, eng_name):
         shop_name = eng_name

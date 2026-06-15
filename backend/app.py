@@ -194,23 +194,22 @@ def api_get_subscriptions(username):
     return jsonify({"subscriptions": subs, "remaining_days": remaining})
 
 
-@app.route("/api/subscriptions/add", methods=["POST"])
+@app.route("/api/subscriptions/set", methods=["POST"])
 @jwt_required()
-def api_add_subscription():
+def api_set_subscription():
     if get_user(get_jwt_identity()).get("is_admin") != 1:
         return jsonify({"error": "صلاحية مطلوبة"}), 403
     data = request.get_json() or {}
     username = data.get("username", "").strip()
     days = int(data.get("days", 0))
-    if not username or days <= 0:
+    if not username or days < 0:
         return jsonify({"error": "بيانات غير صالحة"}), 400
-    today = date.today()
-    start = today.isoformat()
-    end = (today + timedelta(days=days)).isoformat()
-    add_subscription(username, start, end, days)
-    add_pending_message(username, f"تم زيادة اشتراكك {days} يوم من {start} إلى {end}")
+    from database import set_subscription_days, add_pending_message, compute_remaining_days
+    set_subscription_days(username, days)
+    if days > 0:
+        add_pending_message(username, f"تم تعيين اشتراكك {days} يوم")
     remaining = compute_remaining_days(username)
-    return jsonify({"message": f"تمت إضافة {days} أيام", "remaining_days": remaining})
+    return jsonify({"message": f"تم تعيين {days} أيام للمستخدم {username}", "remaining_days": remaining})
 
 
 @app.route("/api/users/<username>", methods=["DELETE"])

@@ -239,9 +239,9 @@ def api_get_users():
     return api_client.get_users()
 
 
-def api_add_subscription(username, days):
+def api_set_subscription(username, days):
     from . import api_client
-    return api_client.add_subscription(username, days)
+    return api_client.set_subscription(username, days)
 
 
 def api_delete_user(username):

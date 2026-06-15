@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -242,13 +242,18 @@ def get_subscriptions(username):
     return [{"start_date": r[0], "end_date": r[1], "days": r[2]} for r in rows]
 
 
-def add_subscription(username, start_date, end_date, days):
+def set_subscription_days(username, days):
     conn = _conn()
     cur = conn.cursor()
-    cur.execute(
-        _q("INSERT INTO subscriptions (username, start_date, end_date, days) VALUES (%s, %s, %s, %s)"),
-        (username, start_date, end_date, days),
-    )
+    cur.execute(_q("DELETE FROM subscriptions WHERE username = %s"), (username,))
+    if days > 0:
+        today = date.today()
+        start = today.isoformat()
+        end = (today + timedelta(days=days)).isoformat()
+        cur.execute(
+            _q("INSERT INTO subscriptions (username, start_date, end_date, days) VALUES (%s, %s, %s, %s)"),
+            (username, start, end, days),
+        )
     conn.commit()
     cur.close()
     conn.close()

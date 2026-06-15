@@ -108,8 +108,8 @@ def get_subscriptions(username):
     return _request("GET", f"/api/subscriptions/{username}")
 
 
-def add_subscription(username, days):
-    return _request("POST", "/api/subscriptions/add", json={
+def set_subscription(username, days):
+    return _request("POST", "/api/subscriptions/set", json={
         "username": username, "days": days,
     })
 
