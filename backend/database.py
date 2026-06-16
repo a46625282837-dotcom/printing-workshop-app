@@ -271,6 +271,20 @@ def remove_all_sessions(username):
     conn.close()
 
 
+def remove_expired_sessions(username, expiry_hours=2):
+    from datetime import datetime, timedelta
+    cutoff = (datetime.utcnow() - timedelta(hours=expiry_hours)).isoformat()
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q("DELETE FROM user_sessions WHERE username = %s AND created_at < %s"),
+        (username, cutoff),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
 def get_max_devices(username):
     conn = _conn()
     cur = conn.cursor()

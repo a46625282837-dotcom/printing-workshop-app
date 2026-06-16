@@ -80,6 +80,34 @@ idcard_app/
 - `ahmed` login only works via API mode (requires running backend server)
 - Local mode removed `ahmed` special case to avoid KeyError — admin must log in through the server
 
+## Session Cleanup Fix (2026-06-16) — Force Login & Expired Token Cleanup
+**Root cause:** User logout or app close didn't reliably remove `user_sessions` rows. Two scenarios:
+1. **JWT expired (2h) before logout** → `@jwt_required()` rejected the request (422) → `remove_session()` never ran → session persisted in DB
+2. **App crash / force close** → no logout request → session persisted
+
+Next login attempt hit `max_devices` limit → "مسجل من لابتوب اخر" error with no recovery.
+
+**Changes — Server (`backend/app.py`):**
+- Login endpoint (`POST /api/auth/login`) accepts new `force_login: true` → calls `remove_all_sessions(username)` then creates fresh session
+- When session limit is reached, response now includes `force_login_available: true` flag so the client knows a force-login retry is possible
+- Added `@jwt.expired_token_loader` handler: extracts `username` + `token_id` from the expired JWT payload and calls `remove_session()` before returning 401 with `session_expired: true`. This cleans up the session even when the token has expired
+- `@jwt.revoked_token_loader` unchanged (still returns `"الحساب شغال في لابتوب آخر"`)
+
+**Changes — Client API (`core/api_client.py`):**
+- `_request()`: new `_fire_session_expired` kwarg (default `True`). When `False`, the `session_expired` callback (which forces logout + shows warning) is suppressed — needed for login attempts where `session_expired` means "too many sessions", not "your session was revoked"
+- `_login_raw()`: internal helper used by both `login()` and `login_check_force()` — always calls `_request(..., _fire_session_expired=False)`
+- `login(username, password, force_login=False)`: passes optional `force_login` in the request body
+- `login_check_force(username, password)`: tries normal login, returns `(data, err, bool)` where the bool is `True` when the error indicates a session limit (contains "أجهزة حالياً")
+
+**Changes — Client DB (`core/database.py`):**
+- `api_login(username, password, force_login=False)`: passes `force_login` through to `api_client.login()`
+- New `api_login_force_check(username, password)`: calls `api_client.login_check_force()`
+
+**Changes — Client UI (`ui/main_window.py`):**
+- `_login_submit()`: after the API call, checks if `need_force` is `True` → shows `QMessageBox.question` asking "هل تريد تسجيل الدخول قسرياً وطرد الجلسات القديمة؟" → on `Yes`, retries with `force_login=True`
+- `_on_session_expired()`: message changed from "الحساب شغال في لابتوب آخر" to "انتهت صلاحية الجلسة" (more accurate for both expiry and revocation)
+- Version bumped to 1.1.2
+
 ## Multi-Device Session Control (Configurable Per User)
 - `user_sessions` table stores active `(username, token_id, created_at)` per device
 - `users.max_devices` column (default=1) controls how many devices a user can login from simultaneously

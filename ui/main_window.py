@@ -660,6 +660,7 @@ class MainWindow(QMainWindow):
         with open(self._session_path(), "w", encoding="utf-8") as f:
             json.dump({
                 "token": token,
+                "token_id": api_client.get_token_id(),
                 "username": self._username,
                 "display_name": self._display_name,
                 "is_admin": self._is_admin,
@@ -688,6 +689,7 @@ class MainWindow(QMainWindow):
             return False
         from core import api_client
         api_client.set_token(token)
+        api_client.set_token_id(sess.get("token_id"))
         api_client.set_username(username)
         from core.database import api_check_auth
         qdata, qerr = api_check_auth()

@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 
 _SERVER_URL = "http://localhost:5000"
 _token = None
+_token_id = None  # last known tid from JWT, sent as logout_token_id on next login
 _username = None
 _session_expired_callback = None
 
@@ -21,9 +22,31 @@ def get_server_url():
     return _SERVER_URL
 
 
+def _decode_token_id(token):
+    """Extract tid claim from a JWT without verifying signature."""
+    if not token:
+        return None
+    try:
+        payload_b64 = token.split(".")[1]
+        pad = 4 - len(payload_b64) % 4
+        if pad != 4:
+            payload_b64 += "=" * pad
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        return payload.get("tid")
+    except Exception:
+        return None
+
+
 def set_token(token):
     global _token
     _token = token
+
+
+def _update_token_id(token):
+    global _token_id
+    tid = _decode_token_id(token)
+    if tid:
+        _token_id = tid
 
 
 def get_token():
@@ -33,6 +56,15 @@ def get_token():
 def set_username(username):
     global _username
     _username = username
+
+
+def get_token_id():
+    return _token_id
+
+
+def set_token_id(tid):
+    global _token_id
+    _token_id = tid
 
 
 def set_session_expired_callback(cb):
@@ -78,9 +110,12 @@ def _request(method, path, **kwargs):
 
 def _login_raw(username, password, **extra):
     payload = {"username": username, "password": password, **extra}
+    if _token_id:
+        payload["logout_token_id"] = _token_id
     data, err = _request("POST", "/api/auth/login", json=payload, _fire_session_expired=False)
     if data:
         set_token(data["token"])
+        _update_token_id(data["token"])
         set_username(data["username"])
     return data, err
 
@@ -104,6 +139,7 @@ def register(username, password, shop_name, phone):
     })
     if data:
         set_token(data["token"])
+        _update_token_id(data["token"])
         set_username(data["username"])
     return data, err
 

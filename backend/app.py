@@ -18,7 +18,8 @@ from .database import (
     save_profile_pixmap, get_profile_pixmap,
     save_banner_pixmap, get_banner_pixmaps, delete_banner_pixmap,
     update_token_id, get_active_session_count, add_session, remove_session,
-    remove_all_sessions, update_max_devices, get_max_devices, get_user_sessions,
+    remove_all_sessions, remove_expired_sessions,
+    update_max_devices, get_max_devices, get_user_sessions,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -120,6 +121,7 @@ def api_login():
         return jsonify({"error": "اسم المستخدم وكلمة المرور مطلوبان"}), 400
     if not verify_password(username, password):
         return jsonify({"error": "اسم المستخدم أو كلمة المرور غير صحيحة"}), 401
+    remove_expired_sessions(username, config.JWT_EXPIRY_HOURS)
     user = get_user(username)
     max_dev = get_max_devices(username) or 1
     if data.get("force_login"):
