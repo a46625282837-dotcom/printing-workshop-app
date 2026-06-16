@@ -237,8 +237,7 @@ class MainWindow(QMainWindow):
         self._my_subs_widget = self._build_my_subscriptions_page()
         self._stack.addWidget(self._my_subs_widget)
 
-        if not use_api:
-            self._update_banners()
+        self._update_banners()
 
         if use_api:
             self._try_restore_session()
@@ -745,8 +744,7 @@ class MainWindow(QMainWindow):
         self._is_admin = qdata.get("is_admin", False)
         self._update_auth_ui()
         self._switch_to_main()
-        if self._is_admin:
-            self._update_banners()
+        self._update_banners()
         if not self._is_admin:
             pend = qdata.get("pending_messages", [])
             if pend:
@@ -815,8 +813,7 @@ class MainWindow(QMainWindow):
                 self._api_data = qdata
             self._update_auth_ui()
             self._switch_to_main()
-            if self._is_admin:
-                self._update_banners()
+            self._update_banners()
             if not self._is_admin and qdata:
                 pend = qdata.get("pending_messages", [])
                 if pend:

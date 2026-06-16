@@ -82,30 +82,46 @@ idcard_app/
 
 ## Session Cleanup Fix (2026-06-16) — Force Login & Expired Token Cleanup
 **Root cause:** User logout or app close didn't reliably remove `user_sessions` rows. Two scenarios:
-1. **JWT expired (2h) before logout** → `@jwt_required()` rejected the request (422) → `remove_session()` never ran → session persisted in DB
-2. **App crash / force close** → no logout request → session persisted
+1. **Logout API call silently fails** (network/server error) → `remove_session()` never ran → session persisted in DB
+2. **JWT expired (2h) before logout** → `@jwt_required()` rejected the request (422) → `remove_session()` never ran → session persisted
+3. **App crash / force close** → no logout request → session persisted
 
-Next login attempt hit `max_devices` limit → "مسجل من لابتوب اخر" error with no recovery.
+Next login attempt hit `max_devices` limit → "مسجل من لابتوب اخر" error / force-login dialog.
 
-**Changes — Server (`backend/app.py`):**
-- Login endpoint (`POST /api/auth/login`) accepts new `force_login: true` → calls `remove_all_sessions(username)` then creates fresh session
-- When session limit is reached, response now includes `force_login_available: true` flag so the client knows a force-login retry is possible
-- Added `@jwt.expired_token_loader` handler: extracts `username` + `token_id` from the expired JWT payload and calls `remove_session()` before returning 401 with `session_expired: true`. This cleans up the session even when the token has expired
-- `@jwt.revoked_token_loader` unchanged (still returns `"الحساب شغال في لابتوب آخر"`)
+**v1 — Force-login dialog (retracted):** Added `force_login: true` param and a client dialog "هل تريد تسجيل الدخول قسرياً". Users got this dialog even when no other device was active → rejected.
 
-**Changes — Client API (`core/api_client.py`):**
-- `_request()`: new `_fire_session_expired` kwarg (default `True`). When `False`, the `session_expired` callback (which forces logout + shows warning) is suppressed — needed for login attempts where `session_expired` means "too many sessions", not "your session was revoked"
-- `_login_raw()`: internal helper used by both `login()` and `login_check_force()` — always calls `_request(..., _fire_session_expired=False)`
-- `login(username, password, force_login=False)`: passes optional `force_login` in the request body
-- `login_check_force(username, password)`: tries normal login, returns `(data, err, bool)` where the bool is `True` when the error indicates a session limit (contains "أجهزة حالياً")
+**v2 — `logout_token_id` mechanism (final):** Client saves the JWT's `tid` (token_id) from the previous login, sends it as `logout_token_id` in the next login request. The server removes that specific session before checking the device limit. This works even if the previous logout API call failed, because the token_id is preserved across login/logout cycles and persisted in the session file.
 
-**Changes — Client DB (`core/database.py`):**
-- `api_login(username, password, force_login=False)`: passes `force_login` through to `api_client.login()`
-- New `api_login_force_check(username, password)`: calls `api_client.login_check_force()`
+**v3 — Expired session pruning:** Login endpoint calls `remove_expired_sessions(username, JWT_EXPIRY_HOURS)` to auto-remove sessions older than 2h before checking the device limit.
 
-**Changes — Client UI (`ui/main_window.py`):**
-- `_login_submit()`: after the API call, checks if `need_force` is `True` → shows `QMessageBox.question` asking "هل تريد تسجيل الدخول قسرياً وطرد الجلسات القديمة؟" → on `Yes`, retries with `force_login=True`
-- `_on_session_expired()`: message changed from "الحساب شغال في لابتوب آخر" to "انتهت صلاحية الجلسة" (more accurate for both expiry and revocation)
+**Files changed:**
+
+**Server (`backend/app.py`):**
+- `remove_expired_sessions()` called at start of login to prune sessions older than `JWT_EXPIRY_HOURS`
+- `force_login: true` still supported as a fallback (clears all sessions)
+- `expired_token_loader` handler (v1): cleans up session when JWT is expired
+- `logout_token_id` support (v0, already existed): removes a specific token_id's session on login
+
+**Server DB (`backend/database.py`):**
+- New `remove_expired_sessions(username, expiry_hours)`: DELETE FROM user_sessions WHERE created_at < cutoff
+
+**Client API (`core/api_client.py`):**
+- `_token_id` global: stores last known JWT `tid` claim
+- `_decode_token_id(token)`: base64-decodes JWT payload to extract `tid` without requiring the JWT library
+- `_update_token_id(token)`: called after successful login/register to update `_token_id`
+- `get_token_id()` / `set_token_id(tid)`: accessors for UI session persistence
+- `_login_raw()`: sends `logout_token_id: _token_id` in the request body (if available)
+- `_request()`: `_fire_session_expired` kwarg prevents callback during login (v1)
+
+**Client DB (`core/database.py`):**
+- `api_login()` passes `force_login` through to `api_client.login()`
+- `api_login_force_check()`: calls `api_client.login_check_force()` (v1, kept as fallback)
+
+**Client UI (`ui/main_window.py`):**
+- `_save_session()` saves `token_id` in session file
+- `_try_restore_session()` restores `token_id` from session file → survives app restarts
+- `_login_submit()`: force-login dialog still present for genuine multi-device cases (v1)
+- `_on_session_expired()`: cleaner message
 - Version bumped to 1.1.2
 
 ## Multi-Device Session Control (Configurable Per User)
