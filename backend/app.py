@@ -126,12 +126,12 @@ def api_login():
     return jsonify({
         "token": token,
         "username": username,
-        "shop_name": user.get("shop_name", ""),
+        "shop_name": user.get("shop_name") or username,
         "is_admin": bool(user.get("is_admin")),
         "reg_date": user.get("reg_date", ""),
         "max_devices": max_dev,
         "active_sessions": active + 1,
-    })
+    }), 201
 
 
 @app.route("/api/auth/logout", methods=["POST"])
@@ -178,7 +178,7 @@ def api_check():
     pixmap_b64 = base64.b64encode(pixmap_bytes).decode() if pixmap_bytes else None
     return jsonify({
         "username": username,
-        "shop_name": user.get("shop_name", ""),
+        "shop_name": user.get("shop_name") or username,
         "phone": user.get("phone", ""),
         "reg_date": user.get("reg_date", ""),
         "is_admin": bool(user.get("is_admin")),

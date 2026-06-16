@@ -946,7 +946,8 @@ class MainWindow(QMainWindow):
                     self._profile_label.setPixmap(pix.scaled(size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
                     self._profile_label.show()
                     return
-        avatar = _make_avatar_pixmap(self._display_name[0], size=size)
+        letter = self._display_name[0] if self._display_name else "?"
+        avatar = _make_avatar_pixmap(letter, size=size)
         self._profile_label.setPixmap(avatar)
 
     def _update_auth_ui(self):
@@ -1875,7 +1876,8 @@ class MainWindow(QMainWindow):
                 pix.loadFromData(pix_data)
                 self._profile_pic_label.setPixmap(_make_circular_pixmap(pix, 100))
             else:
-                avatar = _make_avatar_pixmap(self._display_name[0], size=100)
+                letter = self._display_name[0] if self._display_name else "?"
+                avatar = _make_avatar_pixmap(letter, size=100)
                 self._profile_pic_label.setPixmap(avatar)
             return
         if self._username not in self._users:
@@ -1912,7 +1914,8 @@ class MainWindow(QMainWindow):
             pix.loadFromData(pix_data)
             self._profile_pic_label.setPixmap(_make_circular_pixmap(pix, 100))
         else:
-            avatar = _make_avatar_pixmap(self._display_name[0], size=100)
+            letter = self._display_name[0] if self._display_name else "?"
+            avatar = _make_avatar_pixmap(letter, size=100)
             self._profile_pic_label.setPixmap(avatar)
 
     def _pick_profile_picture(self):
