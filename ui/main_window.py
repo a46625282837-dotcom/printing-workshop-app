@@ -535,6 +535,13 @@ class MainWindow(QMainWindow):
         submit.clicked.connect(lambda: self._login_submit(eng_user, password))
         layout.addWidget(submit, 0, Qt.AlignCenter)
 
+        self._login_spinner = QProgressBar()
+        self._login_spinner.setRange(0, 0)
+        self._login_spinner.setFixedSize(200, 20)
+        self._login_spinner.setTextVisible(False)
+        self._login_spinner.hide()
+        layout.addWidget(self._login_spinner, 0, Qt.AlignCenter)
+
         switch_btn = QPushButton("ليس لديك حساب؟ سجل الآن")
         switch_btn.setStyleSheet("""
             QPushButton {
@@ -615,6 +622,13 @@ class MainWindow(QMainWindow):
         """)
         submit.clicked.connect(lambda: self._register_submit(fields))
         layout.addWidget(submit, 0, Qt.AlignCenter)
+
+        self._register_spinner = QProgressBar()
+        self._register_spinner.setRange(0, 0)
+        self._register_spinner.setFixedSize(200, 20)
+        self._register_spinner.setTextVisible(False)
+        self._register_spinner.hide()
+        layout.addWidget(self._register_spinner, 0, Qt.AlignCenter)
 
         switch_btn = QPushButton("لديك حساب؟ سجل دخول")
         switch_btn.setStyleSheet("""
@@ -746,10 +760,15 @@ class MainWindow(QMainWindow):
         if not username or not pw:
             QMessageBox.warning(self, "تنبيه", "يرجى إدخال اسم المستخدم والرقم السري")
             return
+        self._login_spinner.show()
+        QApplication.processEvents()
         if self._use_api:
             from core.database import api_login, api_check_auth, api_clear_pending
             data, err = api_login(username, pw)
             if err:
+                self._login_spinner.hide()
+                QMessageBox.warning(self, "خطأ", err)
+                return
                 QMessageBox.warning(self, "خطأ", err)
                 return
             self._logged_in = True
@@ -775,12 +794,15 @@ class MainWindow(QMainWindow):
             logger.info("تسجيل دخول API: %s", username)
             return
         if username not in self._users:
+            self._login_spinner.hide()
             QMessageBox.warning(self, "خطأ", "اسم المستخدم غير موجود")
             return
         user = self._users[username]
         if user["password"] != pw:
+            self._login_spinner.hide()
             QMessageBox.warning(self, "خطأ", "الرقم السري غير صحيح")
             return
+        self._login_spinner.hide()
         self._logged_in = True
         self._username = username
         self._display_name = user["shop_name"]
@@ -817,11 +839,14 @@ class MainWindow(QMainWindow):
         if not phone.isdigit() or len(phone) != 11:
             QMessageBox.warning(self, "خطأ", "رقم الهاتف يجب أن يكون 11 رقماً")
             return
+        self._register_spinner.show()
+        QApplication.processEvents()
         if self._use_api:
             from core.database import api_register
             rdata, err = api_register(data["english_name"], data["password"],
                                        data["shop_name"], phone)
             if err:
+                self._register_spinner.hide()
                 QMessageBox.warning(self, "خطأ", err)
                 return
             for line in fields.values():
@@ -840,10 +865,12 @@ class MainWindow(QMainWindow):
             logger.info("تم تسجيل مستخدم API: %s", rdata["username"])
             return
         if data["english_name"] in self._users:
+            self._register_spinner.hide()
             QMessageBox.warning(self, "خطأ", "اسم بالانكليزي موجود مسبقاً")
             return
         for u in self._users.values():
             if u.get("phone") == phone:
+                self._register_spinner.hide()
                 QMessageBox.warning(self, "خطأ", "رقم الهاتف مسجل مسبقاً لحساب آخر")
                 return
         self._users[data["english_name"]] = {
@@ -861,6 +888,7 @@ class MainWindow(QMainWindow):
         self._save_user(data["english_name"])
         for line in fields.values():
             line.clear()
+        self._register_spinner.hide()
         self._logged_in = True
         self._username = data["english_name"]
         self._display_name = data["shop_name"]

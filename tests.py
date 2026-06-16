@@ -422,6 +422,22 @@ class TestRefreshButton(unittest.TestCase):
         self.assertTrue(callable(MainWindow._refresh_user_data))
 
 
+class TestLoginSpinner(unittest.TestCase):
+    def test_login_submit_shows_spinner(self):
+        import inspect
+        from ui.main_window import MainWindow
+        src = inspect.getsource(MainWindow._login_submit)
+        self.assertIn('self._login_spinner.show()', src)
+        self.assertIn('self._login_spinner.hide()', src)
+
+    def test_register_submit_shows_spinner(self):
+        import inspect
+        from ui.main_window import MainWindow
+        src = inspect.getsource(MainWindow._register_submit)
+        self.assertIn('self._register_spinner.show()', src)
+        self.assertIn('self._register_spinner.hide()', src)
+
+
 class TestSessionControl(unittest.TestCase):
     def test_api_client_has_logout(self):
         from core.api_client import logout

@@ -55,6 +55,7 @@ idcard_app/
 - PDF editor: merge/split/reorder pages, add numbers
 - WhatsApp Cloud API notification (optional, configured via dialog)
 - **Refresh button** (`🔄 تحديث`) on main screen — re-fetches user data from server without restarting the app; visible whether logged in or not
+- **Loading spinner** on login/register pages — animated progress bar appears while submitting, hides on completion or error
 - **Multi-device session control** per user — admin sets max devices (1 or 2) from dashboard; users exceeding limit are blocked
 - **Active session count** shown in dashboard (`active / max_devices`); admin can click to change limit
 - **FULL API mode support** — all 24 UI methods work with the remote server:
