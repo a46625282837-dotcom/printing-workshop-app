@@ -105,10 +105,23 @@ def init_db():
     try:
         if _is_pg:
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS token_id TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS max_devices INTEGER DEFAULT 1")
         else:
             cur.execute("ALTER TABLE users ADD COLUMN token_id TEXT DEFAULT ''")
+            try:
+                cur.execute("ALTER TABLE users ADD COLUMN max_devices INTEGER DEFAULT 1")
+            except Exception:
+                pass
     except Exception:
         pass
+    cur.execute(_q(f"""
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            id {SERIAL_TYPE} PRIMARY KEY,
+            username TEXT NOT NULL {REF_CLAUSE},
+            token_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """))
     _ensure_admin(conn, cur)
     conn.commit()
     cur.close()
@@ -153,7 +166,7 @@ def get_all_users():
     conn = _conn()
     cur = conn.cursor()
     cur.execute(
-        _q("SELECT username, shop_name, phone, reg_date, is_admin FROM users ORDER BY reg_date")
+        _q("SELECT username, shop_name, phone, reg_date, is_admin, max_devices FROM users ORDER BY reg_date")
     )
     rows = cur.fetchall()
     cols = [d[0] for d in cur.description]
@@ -204,9 +217,83 @@ def update_profile(username, shop_name, phone):
     conn.close()
 
 
+def get_active_session_count(username):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("SELECT COUNT(*) FROM user_sessions WHERE username = %s"), (username,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row[0] if row else 0
+
+
+def get_user_sessions(username):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("SELECT token_id, created_at FROM user_sessions WHERE username = %s ORDER BY created_at"), (username,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{"token_id": r[0], "created_at": r[1]} for r in rows]
+
+
+def add_session(username, token_id):
+    from datetime import datetime
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q("INSERT INTO user_sessions (username, token_id, created_at) VALUES (%s, %s, %s)"),
+        (username, token_id, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def remove_session(username, token_id):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q("DELETE FROM user_sessions WHERE username = %s AND token_id = %s"),
+        (username, token_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def remove_all_sessions(username):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("DELETE FROM user_sessions WHERE username = %s"), (username,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_max_devices(username):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("SELECT max_devices FROM users WHERE username = %s"), (username,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row[0] if row else 1
+
+
+def update_max_devices(username, max_devices):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("UPDATE users SET max_devices = %s WHERE username = %s"), (max_devices, username))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
 def delete_user(username):
     conn = _conn()
     cur = conn.cursor()
+    cur.execute(_q("DELETE FROM user_sessions WHERE username = %s"), (username,))
     cur.execute(_q("DELETE FROM pending_subs WHERE username = %s"), (username,))
     cur.execute(_q("DELETE FROM subscriptions WHERE username = %s"), (username,))
     cur.execute(_q("DELETE FROM profile_pixmaps WHERE username = %s"), (username,))

@@ -405,6 +405,18 @@ class MainWindow(QMainWindow):
         btn_register.clicked.connect(self._open_register)
         auth_row.addWidget(btn_register)
 
+        self._btn_refresh = QPushButton("🔄 تحديث")
+        self._btn_refresh.setStyleSheet("""
+            QPushButton {
+                background: #6c757d; color: white; font-size: 14px;
+                padding: 10px 20px; border-radius: 8px; border: none;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #5a6268; }
+        """)
+        self._btn_refresh.clicked.connect(self._refresh_user_data)
+        auth_row.addWidget(self._btn_refresh)
+
         auth_margin = QVBoxLayout()
         auth_margin.setAlignment(Qt.AlignCenter)
         auth_margin.addSpacing(30)
@@ -694,6 +706,38 @@ class MainWindow(QMainWindow):
         self._update_auth_ui()
         self._switch_to_main()
         QMessageBox.warning(self, "تنبيه", "الحساب شغال في لابتوب آخر")
+
+    def _refresh_user_data(self):
+        if not self._logged_in:
+            return
+        if not self._use_api:
+            from core.database import load_users
+            self._users = load_users()
+            self._switch_to_main()
+            logger.info("تحديث بيانات المستخدمين من قاعدة البيانات المحلية")
+            return
+        from core.database import api_check_auth
+        qdata, qerr = api_check_auth()
+        if qerr:
+            QMessageBox.warning(self, "خطأ", qerr)
+            return
+        self._api_data = qdata
+        self._display_name = qdata.get("shop_name", self._username)
+        self._is_admin = qdata.get("is_admin", False)
+        self._update_auth_ui()
+        self._switch_to_main()
+        if self._is_admin:
+            self._update_banners()
+        if not self._is_admin:
+            pend = qdata.get("pending_messages", [])
+            if pend:
+                rem = qdata.get("remaining_days", 0)
+                QMessageBox.information(self, "تم التجديد",
+                    f"تم زيادة عدد أيام اشتراكك وأصبحت {rem} يوم")
+                from core.database import api_clear_pending
+                api_clear_pending()
+        self._save_session()
+        logger.info("تحديث بيانات المستخدم: %s", self._username)
 
     def _login_submit(self, eng_user, password):
         username = eng_user.text().strip()
@@ -1131,10 +1175,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(header)
 
         self._dashboard_table = QTableWidget()
-        self._dashboard_table.setColumnCount(7)
+        self._dashboard_table.setColumnCount(9)
         self._dashboard_table.setHorizontalHeaderLabels([
             "اسم المكتبة", "اسم بالانكليزي", "رقم الهاتف",
-            "تاريخ التسجيل", "تاريخ الاشتراك", "أيام الاشتراك", "إجراءات"
+            "تاريخ التسجيل", "تاريخ الاشتراك", "أيام الاشتراك",
+            "الأجهزة", "الحد الأقصى", "إجراءات"
         ])
         self._dashboard_table.horizontalHeader().setStretchLastSection(True)
         self._dashboard_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -1261,6 +1306,21 @@ class MainWindow(QMainWindow):
             self._dashboard_table.setItem(i, 5, QTableWidgetItem(str(remaining)))
             self._dashboard_table.item(i, 5).setForeground(QColor("#333"))
 
+            if self._use_api:
+                active = user.get("active_sessions", 0)
+                max_dev = user.get("max_devices", 1)
+            else:
+                active = 0
+                max_dev = 1
+            sessions_item = QTableWidgetItem(f"{active}/{max_dev}")
+            sessions_item.setForeground(QColor("#333"))
+            sessions_item.setToolTip("اضغط لتغيير الحد الأقصى للأجهزة" if self._use_api else "")
+            self._dashboard_table.setItem(i, 6, sessions_item)
+
+            max_dev_item = QTableWidgetItem(str(max_dev))
+            max_dev_item.setForeground(QColor("#333"))
+            self._dashboard_table.setItem(i, 7, max_dev_item)
+
             actions_widget = QWidget()
             actions_layout = QHBoxLayout(actions_widget)
             actions_layout.setContentsMargins(2, 2, 2, 2)
@@ -1287,7 +1347,7 @@ class MainWindow(QMainWindow):
             btn_delete.clicked.connect(lambda checked, e=eng_name: self._dashboard_delete_user(e))
             actions_layout.addWidget(btn_delete)
 
-            self._dashboard_table.setCellWidget(i, 6, actions_widget)
+            self._dashboard_table.setCellWidget(i, 8, actions_widget)
         logger.info("تحديث لوحة التحكم: %d مستخدم", self._dashboard_table.rowCount())
 
     def _apply_dashboard_filter(self):
@@ -1364,6 +1424,34 @@ class MainWindow(QMainWindow):
             self._refresh_dashboard()
             logger.info("تم تعيين %d أيام للمستخدم %s", d, eng_name)
 
+    def _dashboard_set_max_devices(self, eng_name):
+        if not self._use_api:
+            return
+        shop_name = eng_name
+        from core.database import api_get_user_sessions
+        sdata, serr = api_get_user_sessions(eng_name)
+        if serr:
+            QMessageBox.warning(self, "خطأ", serr)
+            return
+        current_max = sdata.get("max_devices", 1)
+        active = sdata.get("active_sessions", 0)
+        choice, ok = QInputDialog.getItem(self, "الحد الأقصى للأجهزة",
+            f"المستخدم {shop_name}\nالأجهزة النشطة حالياً: {active}\nاختر الحد الأقصى:",
+            ["1", "2"], current=int(current_max == 2), editable=False)
+        if ok and choice:
+            new_max = int(choice)
+            if new_max == current_max:
+                return
+            from core.database import api_set_max_devices
+            rdata, rerr = api_set_max_devices(eng_name, new_max)
+            if rerr:
+                QMessageBox.warning(self, "خطأ", rerr)
+                return
+            QMessageBox.information(self, "تم",
+                f"تم تعيين الحد الأقصى للأجهزة إلى {new_max} للمستخدم {shop_name}")
+            self._refresh_dashboard()
+            logger.info("تم تعيين max_devices=%d للمستخدم %s", new_max, eng_name)
+
     def _dashboard_reset_password(self, eng_name):
         shop_name = eng_name
         if not self._use_api and eng_name in self._users:
@@ -1411,6 +1499,11 @@ class MainWindow(QMainWindow):
             if item:
                 eng_name = item.text()
                 self._show_subscription_history_dialog(eng_name)
+        elif col == 6 and self._use_api:
+            item = self._dashboard_table.item(row, col)
+            if item:
+                eng_name = self._dashboard_table.item(row, 1).text()
+                self._dashboard_set_max_devices(eng_name)
 
     def _show_subscription_history_dialog(self, username):
         today = date.today()
@@ -2091,6 +2184,9 @@ class MainWindow(QMainWindow):
             return
         total = len(self._users) - 1 if not self._use_api else 0
         logger.info("تسجيل خروج. عدد المستخدمين المسجلين: %d", total)
+        if self._use_api:
+            from core.database import api_logout
+            api_logout()
         self._logged_in = False
         self._username = ""
         self._display_name = ""

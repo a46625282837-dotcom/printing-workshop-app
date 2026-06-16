@@ -297,3 +297,18 @@ def api_set_banner(side, pixmap_bytes, link=""):
 def api_delete_banner(side):
     from . import api_client
     return api_client.delete_banner(side)
+
+
+def api_logout():
+    from . import api_client
+    return api_client.logout()
+
+
+def api_get_user_sessions(username):
+    from . import api_client
+    return api_client.get_user_sessions(username)
+
+
+def api_set_max_devices(username, max_devices):
+    from . import api_client
+    return api_client.set_max_devices(username, max_devices)

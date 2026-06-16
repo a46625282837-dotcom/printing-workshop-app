@@ -54,6 +54,9 @@ idcard_app/
 - Photo editor: crop, remove background (rembg QThread with progress bar)
 - PDF editor: merge/split/reorder pages, add numbers
 - WhatsApp Cloud API notification (optional, configured via dialog)
+- **Refresh button** (`🔄 تحديث`) on main screen — re-fetches user data from server without restarting the app; visible whether logged in or not
+- **Multi-device session control** per user — admin sets max devices (1 or 2) from dashboard; users exceeding limit are blocked
+- **Active session count** shown in dashboard (`active / max_devices`); admin can click to change limit
 - **FULL API mode support** — all 24 UI methods work with the remote server:
   - Dashboard loads from server, actions go to server
   - Profile, subscriptions, passwords sync via API
@@ -74,12 +77,18 @@ idcard_app/
 - `ahmed` login only works via API mode (requires running backend server)
 - Local mode removed `ahmed` special case to avoid KeyError — admin must log in through the server
 
-## Single-Session (One Device Per Account)
-- Backend stores `token_id` in `users.token_id` column (UUID generated on each login)
-- JWT includes `tid` claim; `token_in_blocklist_loader` checks it against DB on every request
-- If a new login occurs, old JWT becomes invalid → API returns `401 {"session_expired": true, "error": "الحساب شغال في لابتوب آخر"}`
-- Client-side `api_client._request()` detects `session_expired`, clears token, invokes callback
+## Multi-Device Session Control (Configurable Per User)
+- `user_sessions` table stores active `(username, token_id, created_at)` per device
+- `users.max_devices` column (default=1) controls how many devices a user can login from simultaneously
+- On login: backend checks `active_sessions < max_devices` → if full, returns 401 `"الحساب مسجل دخول على {max_devices} أجهزة حالياً"`
+- JWT includes `tid` claim; `token_in_blocklist_loader` checks session exists in `user_sessions` table
+- Client-side `api_client._request()` detects `session_expired` (401 with `session_expired: true`), clears token, invokes callback
 - UI callback shows warning dialog and forces logout
+- **New endpoint** `POST /api/auth/logout` — removes the JWT's `tid` from `user_sessions`
+- **Admin endpoints**:
+  - `GET /api/users/<username>/sessions` — returns `{active_sessions, max_devices}`
+  - `POST /api/users/<username>/max-devices` — sets `max_devices` (1 or 2)
+- Dashboard table shows `active_sessions / max_devices` in column **الأجهزة**; clicking opens a dialog to change `max_devices`
 
 ## Responsive UI
 - Window size: 85% of screen (capped at 1400x900)
@@ -93,11 +102,19 @@ idcard_app/
 - Development (non-frozen): reads `data/app_config.json` from source tree, falls back to env vars, then `http://localhost:5000`
 
 ## Subscription UX
-- Subscription only blocks PRINT and SAVE operations, NOT section access
-- `_NO_SUB_MSG` in `ui/main_window.py` shown by `_require_subscription()` for print/save
-- `_check_section_access()` always returns True — users can open sections freely
+- Subscription blocks section access when `remaining_days <= 0` (admin exempt)
+- `_NO_SUB_MSG` in `ui/main_window.py` shown by `_require_subscription()` and `_check_section_access()`
+- Subscription is SET (exact days), not ADD — admin enters final number of days; 0 disables user immediately
 - Current message: `"يجب أن تشترك قبل الاستخدام. تواصل مع المالك: واتساب 07865402819"`
 - Update `_NO_SUB_MSG` to change the contact number or message
+
+## Refresh Data Button
+- **`_btn_refresh`** in `_build_main_screen()` — always visible on the main screen
+- **`_refresh_user_data()`** method:
+  - When logged in via API: calls `check_auth()`, updates `_api_data`, re-saves session
+  - When logged in locally: reloads users from SQLite
+  - When not logged in: no-op
+  - Handles pending messages (subscription renewal notifications)
 
 ## Build
 ```bash

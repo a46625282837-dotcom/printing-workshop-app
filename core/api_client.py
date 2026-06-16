@@ -158,3 +158,17 @@ def delete_banner(side):
 
 def clear_pending():
     return _request("POST", "/api/pending/clear")
+
+
+def logout():
+    return _request("POST", "/api/auth/logout")
+
+
+def get_user_sessions(username):
+    return _request("GET", f"/api/users/{username}/sessions")
+
+
+def set_max_devices(username, max_devices):
+    return _request("POST", f"/api/users/{username}/max-devices", json={
+        "max_devices": max_devices,
+    })

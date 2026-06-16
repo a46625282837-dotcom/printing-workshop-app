@@ -415,5 +415,31 @@ class TestWordFontSizeAdapter(unittest.TestCase):
             self.assertIn(sz, WordFontSizeAdapter.WORD_SIZES)
 
 
+class TestRefreshButton(unittest.TestCase):
+    def test_refresh_user_data_method_exists(self):
+        from ui.main_window import MainWindow
+        self.assertTrue(hasattr(MainWindow, '_refresh_user_data'))
+        self.assertTrue(callable(MainWindow._refresh_user_data))
+
+
+class TestSessionControl(unittest.TestCase):
+    def test_api_client_has_logout(self):
+        from core.api_client import logout
+        self.assertTrue(callable(logout))
+
+    def test_api_client_has_get_user_sessions(self):
+        from core.api_client import get_user_sessions
+        self.assertTrue(callable(get_user_sessions))
+
+    def test_api_client_has_set_max_devices(self):
+        from core.api_client import set_max_devices
+        self.assertTrue(callable(set_max_devices))
+
+    def test_dashboard_set_max_devices_method_exists(self):
+        from ui.main_window import MainWindow
+        self.assertTrue(hasattr(MainWindow, '_dashboard_set_max_devices'))
+        self.assertTrue(callable(MainWindow._dashboard_set_max_devices))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

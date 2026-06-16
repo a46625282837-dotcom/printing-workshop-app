@@ -12,11 +12,13 @@ from . import config
 from .database import (
     init_db, get_user, get_all_users, create_user, update_password,
     update_profile, delete_user, verify_password,
-    get_subscriptions, add_subscription, compute_remaining_days,
+    get_subscriptions, set_subscription_days, add_subscription,
+    compute_remaining_days,
     get_pending_messages, add_pending_message, clear_pending,
     save_profile_pixmap, get_profile_pixmap,
     save_banner_pixmap, get_banner_pixmaps, delete_banner_pixmap,
-    update_token_id,
+    update_token_id, get_active_session_count, add_session, remove_session,
+    update_max_devices, get_max_devices, get_user_sessions,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -37,7 +39,8 @@ def _session_check(jwt_header, jwt_payload):
     user = get_user(username)
     if not user:
         return True
-    return user.get("token_id", "") != token_id
+    sessions = get_user_sessions(username)
+    return not any(s["token_id"] == token_id for s in sessions)
 
 
 @jwt.revoked_token_loader
@@ -102,8 +105,16 @@ def api_login():
     if not verify_password(username, password):
         return jsonify({"error": "اسم المستخدم أو كلمة المرور غير صحيحة"}), 401
     user = get_user(username)
+    max_dev = get_max_devices(username)
+    active = get_active_session_count(username)
+    _logout_token_id = data.get("logout_token_id")
+    if _logout_token_id:
+        remove_session(username, _logout_token_id)
+        active = get_active_session_count(username)
+    if active >= max_dev:
+        return jsonify({"error": f"الحساب مسجل دخول على {max_dev} أجهزة حالياً", "session_expired": True}), 401
     token_id = str(uuid.uuid4())
-    update_token_id(username, token_id)
+    add_session(username, token_id)
     token = create_access_token(identity=username, additional_claims={"tid": token_id})
     return jsonify({
         "token": token,
@@ -111,7 +122,19 @@ def api_login():
         "shop_name": user.get("shop_name", ""),
         "is_admin": bool(user.get("is_admin")),
         "reg_date": user.get("reg_date", ""),
+        "max_devices": max_dev,
+        "active_sessions": active + 1,
     })
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+@jwt_required()
+def api_logout():
+    username = get_jwt_identity()
+    token_id = get_jwt().get("tid")
+    if token_id:
+        remove_session(username, token_id)
+    return jsonify({"message": "تم تسجيل الخروج"})
 
 
 @app.route("/api/auth/register", methods=["POST"])
@@ -171,6 +194,8 @@ def api_get_users():
         remaining = compute_remaining_days(u["username"])
         subs = get_subscriptions(u["username"])
         latest = subs[-1]["start_date"] if subs else None
+        active_sessions = get_active_session_count(u["username"])
+        max_dev = get_max_devices(u["username"])
         result.append({
             "username": u["username"],
             "shop_name": u["shop_name"],
@@ -178,6 +203,8 @@ def api_get_users():
             "reg_date": u["reg_date"],
             "remaining_days": remaining,
             "latest_sub_start": latest,
+            "active_sessions": active_sessions,
+            "max_devices": max_dev,
         })
     return jsonify(result)
 
@@ -204,7 +231,6 @@ def api_set_subscription():
     days = int(data.get("days", 0))
     if not username or days < 0:
         return jsonify({"error": "بيانات غير صالحة"}), 400
-    from database import set_subscription_days, add_pending_message, compute_remaining_days
     set_subscription_days(username, days)
     if days > 0:
         add_pending_message(username, f"تم تعيين اشتراكك {days} يوم")
@@ -221,6 +247,32 @@ def api_delete_user(username):
         return jsonify({"error": "لا يمكن حذف المالك"}), 400
     delete_user(username)
     return jsonify({"message": "تم حذف المستخدم"})
+
+
+@app.route("/api/users/<username>/sessions", methods=["GET"])
+@jwt_required()
+def api_user_sessions(username):
+    if get_user(get_jwt_identity()).get("is_admin") != 1:
+        return jsonify({"error": "صلاحية مطلوبة"}), 403
+    max_dev = get_max_devices(username)
+    active = get_active_session_count(username)
+    return jsonify({"username": username, "active_sessions": active, "max_devices": max_dev})
+
+
+@app.route("/api/users/<username>/max-devices", methods=["POST"])
+@jwt_required()
+def api_set_max_devices(username):
+    if get_user(get_jwt_identity()).get("is_admin") != 1:
+        return jsonify({"error": "صلاحية مطلوبة"}), 403
+    data = request.get_json() or {}
+    max_dev = int(data.get("max_devices", 1))
+    if max_dev not in (1, 2):
+        return jsonify({"error": "يجب أن يكون 1 أو 2"}), 400
+    update_max_devices(username, max_dev)
+    active = get_active_session_count(username)
+    if active > max_dev:
+        remove_all_sessions(username)
+    return jsonify({"message": f"تم تعيين الحد الأقصى للأجهزة إلى {max_dev} للمستخدم {username}"})
 
 
 @app.route("/api/users/password", methods=["PUT"])
