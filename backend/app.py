@@ -105,7 +105,7 @@ def api_login():
     if not verify_password(username, password):
         return jsonify({"error": "اسم المستخدم أو كلمة المرور غير صحيحة"}), 401
     user = get_user(username)
-    max_dev = get_max_devices(username)
+    max_dev = get_max_devices(username) or 1
     active = get_active_session_count(username)
     _logout_token_id = data.get("logout_token_id")
     if _logout_token_id:
@@ -204,7 +204,7 @@ def api_get_users():
             "remaining_days": remaining,
             "latest_sub_start": latest,
             "active_sessions": active_sessions,
-            "max_devices": max_dev,
+            "max_devices": max_dev if max_dev is not None else 1,
         })
     return jsonify(result)
 

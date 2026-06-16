@@ -422,6 +422,28 @@ class TestRefreshButton(unittest.TestCase):
         self.assertTrue(callable(MainWindow._refresh_user_data))
 
 
+class TestMaxDevicesDefault(unittest.TestCase):
+    def test_get_max_devices_returns_1_when_none(self):
+        from backend.database import get_max_devices
+        import unittest.mock as mock
+        with mock.patch("backend.database._conn") as mock_conn:
+            mock_cur = mock.MagicMock()
+            mock_conn.return_value.cursor.return_value = mock_cur
+            mock_cur.fetchone.return_value = (None,)
+            result = get_max_devices("nonexistent")
+            self.assertEqual(result, 1)
+
+    def test_get_max_devices_returns_value_when_set(self):
+        from backend.database import get_max_devices
+        import unittest.mock as mock
+        with mock.patch("backend.database._conn") as mock_conn:
+            mock_cur = mock.MagicMock()
+            mock_conn.return_value.cursor.return_value = mock_cur
+            mock_cur.fetchone.return_value = (2,)
+            result = get_max_devices("testuser")
+            self.assertEqual(result, 2)
+
+
 class TestLoginSpinner(unittest.TestCase):
     def test_login_submit_shows_spinner(self):
         import inspect
