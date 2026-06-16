@@ -479,5 +479,17 @@ class TestSessionControl(unittest.TestCase):
         self.assertTrue(callable(MainWindow._dashboard_set_max_devices))
 
 
+class TestServerImport(unittest.TestCase):
+    """Server-side import should not fail (no orphan imports)."""
+
+    def test_backend_app_imports_cleanly(self):
+        """Importing backend.app must not raise ImportError."""
+        try:
+            from backend.app import app
+            self.assertIsNotNone(app)
+        except ImportError as e:
+            self.fail(f"backend.app raised ImportError: {e}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

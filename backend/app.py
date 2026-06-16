@@ -12,7 +12,7 @@ from . import config
 from .database import (
     init_db, get_user, get_all_users, create_user, update_password,
     update_profile, delete_user, verify_password,
-    get_subscriptions, set_subscription_days, add_subscription,
+    get_subscriptions, set_subscription_days,
     compute_remaining_days,
     get_pending_messages, add_pending_message, clear_pending,
     save_profile_pixmap, get_profile_pixmap,
