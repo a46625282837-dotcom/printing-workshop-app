@@ -5,6 +5,8 @@
 - Dual-mode: local SQLite or Flask REST API mode (`IDCARD_API_MODE` env var or `data/app_config.json`)
 - For wide distribution: Client-Server (API mode) — users connect to a central Flask server
 
+**Bug note (2026-06-16):** `QProgressBar` was used in `_build_login_page()` / `_build_register_page()` but missing from imports → `NameError` on init. Fixed by adding `QProgressBar` to the PySide6.QtWidgets import tuple.
+
 ## Directory Structure
 ```
 idcard_app/
@@ -35,14 +37,14 @@ idcard_app/
 │   ├── notifier_config.json # WhatsApp Cloud API config
 │   └── app_config.json      # Server URL config (created automatically)
 ├── ui/
-│   ├── main_window.py       # Main UI (~2040 lines): FULL API mode support
+│   ├── main_window.py       # Main UI (~2257 lines): FULL API mode support
 │   │                        #   - Dashboard, profile, subscriptions, banners
 │   │                        #   - All methods work in both local and API mode
 │   ├── a4_editor.py         # ID card editor: grid, print, save PDF
 │   ├── id_card_item.py      # Card graphics item
 │   ├── photo_editor.py      # Photo editor + PhotoProcessingThread + progress bar
 │   └── pdf_editor.py        # PDF editing with page numbers
-├── tests.py                 # 45 tests (pytest + pytest-qt)
+├── tests.py                 # 54 tests (pytest + pytest-qt)
 └── dist/
     └── ورشة طباعة.exe       # Standalone executable (~347 MB, --onefile)
 ```
@@ -65,7 +67,7 @@ idcard_app/
   - Subscription checks use server data (no bypass possible)
 - Config file `data/app_config.json` (no env vars needed for users)
 - Frozen-aware paths: data next to exe, not in temp
-- 45 passing tests (no regression)
+- 54 passing tests (no regression)
 
 ## Production Security
 - `JWT_SECRET` auto-generates via `secrets.token_hex(32)` if not set via env var
