@@ -124,6 +124,13 @@ Next login attempt hit `max_devices` limit → "مسجل من لابتوب اخ�
 - `_on_session_expired()`: cleaner message
 - Version bumped to 1.1.2
 
+## Banner Visibility Fix (2026-06-16)
+**Root cause:** In API mode, `_update_banners()` was guarded by `if self._is_admin:` in 3 locations (`__init__`, `_login_submit`, `_refresh_user_data`). Banners are stored server-side in `banner_pixmaps` table and `GET /api/banners` is accessible to any authenticated user, but the admin-only guard prevented non-admin clients from fetching/displaying them.
+
+**Fix:** Removed the `if self._is_admin:` guard from all 3 `_update_banners()` call sites. The method already handles both API mode (fetches from server) and local mode (reads from `self._users["ahmed"]`) correctly.
+
+**Files changed:** `ui/main_window.py` — 3 lines changed (removed admin guard)
+
 ## Multi-Device Session Control (Configurable Per User)
 - `user_sessions` table stores active `(username, token_id, created_at)` per device
 - `users.max_devices` column (default=1) controls how many devices a user can login from simultaneously
