@@ -44,7 +44,7 @@ idcard_app/
 │   ├── id_card_item.py      # Card graphics item
 │   ├── photo_editor.py      # Photo editor + PhotoProcessingThread + progress bar
 │   └── pdf_editor.py        # PDF editing with page numbers
-├── tests.py                 # 54 tests (pytest + pytest-qt)
+├── tests.py                 # 55 tests (pytest + pytest-qt)
 └── dist/
     └── ورشة طباعة.exe       # Standalone executable (~347 MB, --onefile)
 ```
@@ -67,7 +67,7 @@ idcard_app/
   - Subscription checks use server data (no bypass possible)
 - Config file `data/app_config.json` (no env vars needed for users)
 - Frozen-aware paths: data next to exe, not in temp
-- 54 passing tests (no regression)
+- 55 passing tests (no regression)
 
 ## Production Security
 - `JWT_SECRET` auto-generates via `secrets.token_hex(32)` if not set via env var
@@ -103,6 +103,11 @@ idcard_app/
 - When running as frozen exe: **always uses API mode** with hardcoded `_SERVER_URL = "https://printing-workshop-api.onrender.com"`
 - `data/app_config.json` is bundled inside the exe; if present next to exe at runtime, its `server_url` overrides the hardcoded one
 - Development (non-frozen): reads `data/app_config.json` from source tree, falls back to env vars, then `http://localhost:5000`
+
+## Server Import Fix (2026-06-16)
+- `backend/app.py` line 15 imported `add_subscription` from `backend.database`, which was renamed to `set_subscription_days` in commit `da7e928`
+- Leftover import caused `ImportError` on startup → server would crash on deploy
+- Removed orphan `add_subscription` from import tuple; added regression test `TestServerImport`
 
 ## Subscription UX
 - Subscription blocks section access when `remaining_days <= 0` (admin exempt)
