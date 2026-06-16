@@ -53,12 +53,13 @@ def _headers():
 
 def _request(method, path, **kwargs):
     url = f"{_SERVER_URL}{path}"
+    fire_session_expired = kwargs.pop("_fire_session_expired", True)
     try:
         resp = requests.request(method, url, headers=_headers(), timeout=10, **kwargs)
         if resp.status_code >= 400:
             err = resp.json()
             err_msg = err.get("error", "خطأ في الاتصال")
-            if err.get("session_expired"):
+            if err.get("session_expired") and fire_session_expired:
                 set_token(None)
                 set_username(None)
                 if _session_expired_callback:
@@ -75,14 +76,25 @@ def _request(method, path, **kwargs):
         return None, str(e)
 
 
-def login(username, password):
-    data, err = _request("POST", "/api/auth/login", json={
-        "username": username, "password": password,
-    })
+def _login_raw(username, password, **extra):
+    payload = {"username": username, "password": password, **extra}
+    data, err = _request("POST", "/api/auth/login", json=payload, _fire_session_expired=False)
     if data:
         set_token(data["token"])
         set_username(data["username"])
     return data, err
+
+
+def login(username, password, force_login=False):
+    extra = {"force_login": True} if force_login else {}
+    return _login_raw(username, password, **extra)
+
+
+def login_check_force(username, password):
+    data, err = _login_raw(username, password)
+    if err and "أجهزة حالياً" in err:
+        return data, err, True
+    return data, err, False
 
 
 def register(username, password, shop_name, phone):

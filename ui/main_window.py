@@ -13,7 +13,7 @@ from PySide6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QBrush, QFo
 from PySide6.QtWidgets import QGraphicsDropShadowEffect
 from datetime import date, timedelta
 
-APP_VERSION = "1.1.1"  # bump when building a new EXE
+APP_VERSION = "1.1.2"  # bump when building a new EXE
 from ui.a4_editor import A4Editor
 from ui.photo_editor import PhotoEditor
 from ui.pdf_editor import PdfEditor
@@ -722,7 +722,7 @@ class MainWindow(QMainWindow):
         self._is_admin = False
         self._update_auth_ui()
         self._switch_to_main()
-        QMessageBox.warning(self, "تنبيه", "الحساب شغال في لابتوب آخر")
+        QMessageBox.warning(self, "تنبيه", "انتهت صلاحية الجلسة، يرجى تسجيل الدخول مرة أخرى")
 
     def _refresh_user_data(self):
         if not self._logged_in:
@@ -788,12 +788,19 @@ class MainWindow(QMainWindow):
         self._login_spinner.show()
         QApplication.processEvents()
         if self._use_api:
-            from core.database import api_login, api_check_auth, api_clear_pending
-            data, err = api_login(username, pw)
+            from core.database import api_login, api_login_force_check, api_check_auth, api_clear_pending
+            data, err, need_force = api_login_force_check(username, pw)
+            if need_force:
+                ret = QMessageBox.question(self, "تسجيل الدخول قسرياً",
+                    "هذا الحساب مسجل على جهاز آخر\nهل تريد تسجيل الدخول قسرياً وطرد الجلسات القديمة؟",
+                    QMessageBox.Yes | QMessageBox.No)
+                if ret == QMessageBox.Yes:
+                    data, err = api_login(username, pw, force_login=True)
+                else:
+                    self._login_spinner.hide()
+                    return
             if err:
                 self._login_spinner.hide()
-                QMessageBox.warning(self, "خطأ", err)
-                return
                 QMessageBox.warning(self, "خطأ", err)
                 return
             self._logged_in = True

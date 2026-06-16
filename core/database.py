@@ -218,12 +218,17 @@ def clear_pending(username):
 
 
 # API mode wrappers
-def api_login(username, password):
+def api_login(username, password, force_login=False):
     from . import api_client
-    data, err = api_client.login(username, password)
+    data, err = api_client.login(username, password, force_login=force_login)
     if err:
         return None, err
     return data, None
+
+
+def api_login_force_check(username, password):
+    from . import api_client
+    return api_client.login_check_force(username, password)
 
 
 def api_register(username, password, shop_name, phone):

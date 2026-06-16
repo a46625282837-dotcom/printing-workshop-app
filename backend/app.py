@@ -18,7 +18,7 @@ from .database import (
     save_profile_pixmap, get_profile_pixmap,
     save_banner_pixmap, get_banner_pixmaps, delete_banner_pixmap,
     update_token_id, get_active_session_count, add_session, remove_session,
-    update_max_devices, get_max_devices, get_user_sessions,
+    remove_all_sessions, update_max_devices, get_max_devices, get_user_sessions,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -46,6 +46,15 @@ def _session_check(jwt_header, jwt_payload):
 @jwt.revoked_token_loader
 def _session_expired(jwt_header, jwt_payload):
     return jsonify({"error": "الحساب شغال في لابتوب آخر", "session_expired": True}), 401
+
+
+@jwt.expired_token_loader
+def _token_expired(jwt_header, jwt_payload):
+    username = jwt_payload.get("sub")
+    token_id = jwt_payload.get("tid")
+    if username and token_id:
+        remove_session(username, token_id)
+    return jsonify({"error": "انتهت صلاحية الجلسة", "session_expired": True}), 401
 
 
 init_db()
@@ -113,13 +122,17 @@ def api_login():
         return jsonify({"error": "اسم المستخدم أو كلمة المرور غير صحيحة"}), 401
     user = get_user(username)
     max_dev = get_max_devices(username) or 1
-    active = get_active_session_count(username)
-    _logout_token_id = data.get("logout_token_id")
-    if _logout_token_id:
-        remove_session(username, _logout_token_id)
+    if data.get("force_login"):
+        remove_all_sessions(username)
+        active = 0
+    else:
         active = get_active_session_count(username)
+        _logout_token_id = data.get("logout_token_id")
+        if _logout_token_id:
+            remove_session(username, _logout_token_id)
+            active = get_active_session_count(username)
     if active >= max_dev:
-        return jsonify({"error": f"الحساب مسجل دخول على {max_dev} أجهزة حالياً", "session_expired": True}), 401
+        return jsonify({"error": f"الحساب مسجل دخول على {max_dev} أجهزة حالياً", "session_expired": True, "force_login_available": True}), 401
     token_id = str(uuid.uuid4())
     add_session(username, token_id)
     token = create_access_token(identity=username, additional_claims={"tid": token_id})
