@@ -18,7 +18,7 @@ from .database import (
     save_profile_pixmap, get_profile_pixmap,
     save_banner_pixmap, get_banner_pixmaps, delete_banner_pixmap,
     update_token_id, get_active_session_count, add_session, remove_session,
-    remove_all_sessions, update_max_devices, get_max_devices, get_user_sessions,
+    update_max_devices, get_max_devices, get_user_sessions,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -132,17 +132,6 @@ def api_login():
         "max_devices": max_dev,
         "active_sessions": active + 1,
     }), 201
-
-
-@app.route("/api/auth/clear-sessions", methods=["POST"])
-def api_clear_sessions():
-    data = request.get_json() or {}
-    username = data.get("username", "").strip()
-    secret = data.get("secret", "")
-    if username == "ahmed" and secret == "clear123":
-        remove_all_sessions(username)
-        return jsonify({"message": "تم مسح الجلسات"})
-    return jsonify({"error": "غير مصرح"}), 403
 
 
 @app.route("/api/auth/logout", methods=["POST"])
