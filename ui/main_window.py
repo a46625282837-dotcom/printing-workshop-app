@@ -12,6 +12,8 @@ from PySide6.QtCore import Qt, QSize, Signal, QDate
 from PySide6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QBrush, QFont
 from PySide6.QtWidgets import QGraphicsDropShadowEffect
 from datetime import date, timedelta
+
+APP_VERSION = "1.1.0"  # bump when building a new EXE
 from ui.a4_editor import A4Editor
 from ui.photo_editor import PhotoEditor
 from ui.pdf_editor import PdfEditor
@@ -710,6 +712,7 @@ class MainWindow(QMainWindow):
                 from core.database import api_clear_pending
                 api_clear_pending()
         logger.info("استعادة جلسة سابقة: %s", username)
+        self._check_for_updates()
         return True
 
     def _on_session_expired(self):
@@ -751,7 +754,29 @@ class MainWindow(QMainWindow):
                 from core.database import api_clear_pending
                 api_clear_pending()
         self._save_session()
+        self._check_for_updates()
         logger.info("تحديث بيانات المستخدم: %s", self._username)
+
+    def _check_for_updates(self):
+        if not self._use_api:
+            return
+        import webbrowser
+        from core.database import api_check_version
+        vdata, verr = api_check_version()
+        if verr:
+            logger.warning("فشل التحقق من التحديث: %s", verr)
+            return
+        remote_version = vdata.get("version", "")
+        if remote_version and remote_version != APP_VERSION:
+            reply = QMessageBox.question(self, "تحديث متوفر",
+                f"يوجد إصدار جديد ({remote_version}) من التطبيق.\n"
+                "هل تريد تحميل التحديث الآن؟",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if reply == QMessageBox.Yes:
+                webbrowser.open(vdata.get("download_url", ""))
+                logger.info("فتح رابط التحميل: %s", vdata.get("download_url", ""))
+        else:
+            logger.info("التطبيق محدث (الإصدار %s)", APP_VERSION)
 
     def _login_submit(self, eng_user, password):
         username = eng_user.text().strip()
@@ -792,6 +817,7 @@ class MainWindow(QMainWindow):
                     api_clear_pending()
             self._save_session()
             logger.info("تسجيل دخول API: %s", username)
+            self._check_for_updates()
             return
         if username not in self._users:
             self._login_spinner.hide()

@@ -164,6 +164,10 @@ def logout():
     return _request("POST", "/api/auth/logout")
 
 
+def check_version():
+    return _request("GET", "/api/app/version")
+
+
 def get_user_sessions(username):
     return _request("GET", f"/api/users/{username}/sessions")
 

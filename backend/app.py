@@ -53,6 +53,13 @@ init_db()
 
 _DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://www.mediafire.com/file/9k2rkbipiiw61db/%D9%88%D8%B1%D8%B4%D8%A9+%D8%B7%D8%A8%D8%A7%D8%B9%D8%A9.exe/file")
 
+_APP_VERSION = os.environ.get("APP_VERSION", "1.1.0")
+
+
+@app.route("/api/app/version", methods=["GET"])
+def api_app_version():
+    return jsonify({"version": _APP_VERSION, "download_url": _DOWNLOAD_URL})
+
 
 @app.route("/")
 def landing():

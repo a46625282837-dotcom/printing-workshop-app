@@ -44,7 +44,7 @@ idcard_app/
 │   ├── id_card_item.py      # Card graphics item
 │   ├── photo_editor.py      # Photo editor + PhotoProcessingThread + progress bar
 │   └── pdf_editor.py        # PDF editing with page numbers
-├── tests.py                 # 55 tests (pytest + pytest-qt)
+├── tests.py                 # 59 tests (pytest + pytest-qt)
 └── dist/
     └── ورشة طباعة.exe       # Standalone executable (~347 MB, --onefile)
 ```
@@ -67,7 +67,7 @@ idcard_app/
   - Subscription checks use server data (no bypass possible)
 - Config file `data/app_config.json` (no env vars needed for users)
 - Frozen-aware paths: data next to exe, not in temp
-- 55 passing tests (no regression)
+- 59 passing tests (no regression)
 
 ## Production Security
 - `JWT_SECRET` auto-generates via `secrets.token_hex(32)` if not set via env var
@@ -123,6 +123,17 @@ idcard_app/
   - When logged in locally: reloads users from SQLite
   - When not logged in: no-op
   - Handles pending messages (subscription renewal notifications)
+
+## Update Checker (In-App)
+- Server endpoint `GET /api/app/version` returns `{"version": "1.1.0", "download_url": "..."}`
+- `APP_VERSION` constant in `ui/main_window.py` (bump before building new EXE)
+- `_check_for_updates()` method in `MainWindow`:
+  - Called after login / session restore / refresh button
+  - Compares server version with local `APP_VERSION`
+  - If different: QMessageBox asking to download, opens URL in browser
+- `api_client.check_version()` → `core.database.api_check_version()` → server
+- Server also respects `APP_VERSION` env var for overrides
+- No auto-download; user clicks to open the MediaFire link
 
 ## Build
 ```bash

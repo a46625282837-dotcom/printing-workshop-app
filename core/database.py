@@ -239,6 +239,11 @@ def api_get_users():
     return api_client.get_users()
 
 
+def api_check_version():
+    from . import api_client
+    return api_client.check_version()
+
+
 def api_set_subscription(username, days):
     from . import api_client
     return api_client.set_subscription(username, days)

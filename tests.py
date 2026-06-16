@@ -491,5 +491,39 @@ class TestServerImport(unittest.TestCase):
             self.fail(f"backend.app raised ImportError: {e}")
 
 
+class TestAppVersion(unittest.TestCase):
+    """Update-check feature: server endpoint, client function, UI method."""
+
+    def test_server_endpoint_returns_version_and_url(self):
+        """GET /api/app/version returns version and download_url."""
+        from backend.app import app as flask_app
+        with flask_app.test_client() as client:
+            resp = client.get("/api/app/version")
+            self.assertEqual(resp.status_code, 200)
+            data = resp.get_json()
+            self.assertIn("version", data)
+            self.assertIn("download_url", data)
+            self.assertIsInstance(data["version"], str)
+            self.assertIsInstance(data["download_url"], str)
+
+    def test_api_client_has_check_version(self):
+        """api_client.check_version exists and is callable."""
+        from core import api_client
+        self.assertTrue(hasattr(api_client, "check_version"))
+        self.assertTrue(callable(api_client.check_version))
+
+    def test_main_window_has_check_for_updates(self):
+        """MainWindow has _check_for_updates method."""
+        from ui.main_window import MainWindow
+        self.assertTrue(hasattr(MainWindow, "_check_for_updates"))
+        self.assertTrue(callable(MainWindow._check_for_updates))
+
+    def test_app_version_constant_is_string(self):
+        """APP_VERSION in main_window is a non-empty string."""
+        from ui.main_window import APP_VERSION
+        self.assertIsInstance(APP_VERSION, str)
+        self.assertTrue(len(APP_VERSION) > 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
