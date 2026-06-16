@@ -13,7 +13,7 @@ from PySide6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QBrush, QFo
 from PySide6.QtWidgets import QGraphicsDropShadowEffect
 from datetime import date, timedelta
 
-APP_VERSION = "1.1.0"  # bump when building a new EXE
+APP_VERSION = "1.1.1"  # bump when building a new EXE
 from ui.a4_editor import A4Editor
 from ui.photo_editor import PhotoEditor
 from ui.pdf_editor import PdfEditor
