@@ -24,6 +24,7 @@ from .database import (
     create_notification, get_notifications_for_user, get_unread_notifications_count,
     mark_notification_read, mark_all_notifications_read,
     add_notification_reply, get_notification_replies, delete_notification_reply,
+    delete_notification,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -480,6 +481,15 @@ def api_get_notifications():
     notifications = get_notifications_for_user(username)
     unread = get_unread_notifications_count(username)
     return jsonify({"notifications": notifications, "unread_count": unread})
+
+
+@app.route("/api/notifications/<int:nid>", methods=["DELETE"])
+@jwt_required()
+def api_delete_notification(nid):
+    if get_user(get_jwt_identity()).get("is_admin") != 1:
+        return jsonify({"error": "صلاحية مطلوبة"}), 403
+    delete_notification(nid)
+    return jsonify({"message": "تم حذف الإشعار"}), 200
 
 
 @app.route("/api/notifications/read", methods=["POST"])

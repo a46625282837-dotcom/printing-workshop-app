@@ -225,6 +225,7 @@ def create_user(username, password, shop_name, phone):
             (username, hashed, shop_name, phone, date.today().isoformat()),
         )
         conn.commit()
+        mark_all_notifications_read(username)
         return True
     except Exception:
         conn.rollback()
@@ -702,3 +703,15 @@ def delete_notification_reply(reply_id):
     cur.close()
     conn.close()
     logger.info("تم حذف رد الإشعار %s", reply_id)
+
+
+def delete_notification(notification_id):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("DELETE FROM notification_reads WHERE notification_id = %s"), (notification_id,))
+    cur.execute(_q("DELETE FROM notification_replies WHERE notification_id = %s"), (notification_id,))
+    cur.execute(_q("DELETE FROM notifications WHERE id = %s"), (notification_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("تم حذف الإشعار %s نهائياً", notification_id)
