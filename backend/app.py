@@ -20,6 +20,10 @@ from .database import (
     update_token_id, get_active_session_count, add_session, remove_session,
     remove_all_sessions, remove_expired_sessions,
     update_max_devices, get_max_devices, get_user_sessions,
+    get_subscription_required, set_subscription_required,
+    create_notification, get_notifications_for_user, get_unread_notifications_count,
+    mark_notification_read, mark_all_notifications_read,
+    add_notification_reply, get_notification_replies, delete_notification_reply,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -61,9 +65,9 @@ def _token_expired(jwt_header, jwt_payload):
 init_db()
 
 
-_DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://www.mediafire.com/file/s1raqpusupem1ae/%D9%88%D8%B1%D8%B4%D8%A9+%D8%B7%D8%A8%D8%A7%D8%B9%D8%A9.exe/file")
+_DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://www.mediafire.com/file/jlpclw9nnpdmukr/%D9%88%D8%B1%D8%B4%D8%A9+%D8%B7%D8%A8%D8%A7%D8%B9%D8%A9.exe/file")
 
-_APP_VERSION = os.environ.get("APP_VERSION", "1.1.1")
+_APP_VERSION = os.environ.get("APP_VERSION", "1.3.0")
 
 
 @app.route("/api/app/version", methods=["GET"])
@@ -175,6 +179,7 @@ def api_register():
     if create_user(username, password, shop_name, phone):
         token_id = str(uuid.uuid4())
         update_token_id(username, token_id)
+        add_session(username, token_id)
         token = create_access_token(identity=username, additional_claims={"tid": token_id})
         return jsonify({"token": token, "username": username}), 201
     return jsonify({"error": "اسم المستخدم موجود مسبقاً"}), 409
@@ -198,6 +203,7 @@ def api_check():
         "reg_date": user.get("reg_date", ""),
         "is_admin": bool(user.get("is_admin")),
         "remaining_days": remaining,
+        "subscription_required": bool(get_subscription_required()),
         "pending_messages": pending,
         "profile_pixmap": pixmap_b64,
     })
@@ -426,6 +432,121 @@ def api_notifier_config():
         _save_config(data)
         return jsonify({"message": "تم الحفظ"})
     return jsonify(_load_config())
+
+
+@app.route("/api/settings", methods=["GET"])
+@jwt_required()
+def api_get_settings():
+    return jsonify({"subscription_required": bool(get_subscription_required())})
+
+
+@app.route("/api/settings/subscription-required", methods=["POST"])
+@jwt_required()
+def api_set_subscription_required_setting():
+    if get_user(get_jwt_identity()).get("is_admin") != 1:
+        return jsonify({"error": "صلاحية مطلوبة"}), 403
+    data = request.get_json() or {}
+    enabled = bool(data.get("enabled", True))
+    set_subscription_required(enabled)
+    logger.info("Admin toggled subscription_required = %s", enabled)
+    return jsonify({"message": "تم الحفظ", "subscription_required": enabled})
+
+
+@app.route("/api/notifications", methods=["POST"])
+@jwt_required()
+def api_create_notification():
+    if get_user(get_jwt_identity()).get("is_admin") != 1:
+        return jsonify({"error": "صلاحية مطلوبة"}), 403
+    data = request.get_json() or {}
+    ntype = data.get("type", "")
+    text = (data.get("text") or "").strip()
+    link_url = (data.get("link_url") or "").strip()
+    link_label = (data.get("link_label") or "").strip()
+    question = (data.get("question") or "").strip()
+    if ntype not in ("link", "question", "plain"):
+        return jsonify({"error": "نوع الإشعار غير صالح"}), 400
+    if not text:
+        return jsonify({"error": "نص الإشعار مطلوب"}), 400
+    if ntype == "link" and not link_url:
+        return jsonify({"error": "رابط الإشعار مطلوب"}), 400
+    nid = create_notification(ntype, text, link_url, link_label, question)
+    return jsonify({"message": "تم إرسال الإشعار", "id": nid}), 201
+
+
+@app.route("/api/notifications", methods=["GET"])
+@jwt_required()
+def api_get_notifications():
+    username = get_jwt_identity()
+    notifications = get_notifications_for_user(username)
+    unread = get_unread_notifications_count(username)
+    return jsonify({"notifications": notifications, "unread_count": unread})
+
+
+@app.route("/api/notifications/read", methods=["POST"])
+@jwt_required()
+def api_mark_notifications_read():
+    username = get_jwt_identity()
+    data = request.get_json() or {}
+    nid = data.get("notification_id")
+    if nid:
+        mark_notification_read(int(nid), username)
+    elif data.get("all"):
+        mark_all_notifications_read(username)
+    return jsonify({"message": "تم"}), 200
+
+
+@app.route("/api/notifications/<int:nid>/reply", methods=["POST"])
+@jwt_required()
+def api_reply_notification(nid):
+    username = get_jwt_identity()
+    data = request.get_json() or {}
+    reply_text = (data.get("reply_text") or "").strip()
+    if not reply_text:
+        return jsonify({"error": "الرد مطلوب"}), 400
+    nid = add_notification_reply(nid, username, reply_text)
+    return jsonify({"message": "تم إرسال ردك", "id": nid}), 201
+
+
+@app.route("/api/notifications/replies", methods=["GET"])
+@jwt_required()
+def api_get_notifications_replies():
+    if get_user(get_jwt_identity()).get("is_admin") != 1:
+        return jsonify({"error": "صلاحية مطلوبة"}), 403
+    return jsonify(get_notification_replies())
+
+
+@app.route("/api/notifications/replies/<int:rid>", methods=["DELETE"])
+@jwt_required()
+def api_delete_notification_reply(rid):
+    if get_user(get_jwt_identity()).get("is_admin") != 1:
+        return jsonify({"error": "صلاحية مطلوبة"}), 403
+    delete_notification_reply(rid)
+    return jsonify({"message": "تم حذف الرد"})
+
+
+@app.route("/api/users/<username>", methods=["GET"])
+@jwt_required()
+def api_get_user_details(username):
+    if get_user(get_jwt_identity()).get("is_admin") != 1:
+        return jsonify({"error": "صلاحية مطلوبة"}), 403
+    user = get_user(username)
+    if not user:
+        return jsonify({"error": "المستخدم غير موجود"}), 404
+    subs = get_subscriptions(username)
+    remaining = compute_remaining_days(username)
+    active = get_active_session_count(username)
+    max_dev = get_max_devices(username) or 1
+    return jsonify({
+        "username": username,
+        "shop_name": user.get("shop_name") or username,
+        "phone": user.get("phone", ""),
+        "reg_date": user.get("reg_date", ""),
+        "is_admin": bool(user.get("is_admin")),
+        "remaining_days": remaining,
+        "subscriptions": subs,
+        "active_sessions": active,
+        "max_devices": max_dev,
+    })
 
 def run_server(host="0.0.0.0", port=5000, debug=False):
     logger.info("Starting backend server on %s:%s", host, port)

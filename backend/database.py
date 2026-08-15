@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -102,12 +102,50 @@ def init_db():
             link TEXT DEFAULT ''
         )
     """))
+    cur.execute(_q("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """))
+    cur.execute(_q(f"""
+        CREATE TABLE IF NOT EXISTS notifications (
+            id {SERIAL_TYPE} PRIMARY KEY,
+            type TEXT NOT NULL,
+            text TEXT NOT NULL DEFAULT '',
+            link_url TEXT DEFAULT '',
+            link_label TEXT DEFAULT '',
+            question TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """))
+    cur.execute(_q("""
+        CREATE TABLE IF NOT EXISTS notification_reads (
+            notification_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            read_at TEXT NOT NULL,
+            PRIMARY KEY (notification_id, username)
+        )
+    """))
+    cur.execute(_q(f"""
+        CREATE TABLE IF NOT EXISTS notification_replies (
+            id {SERIAL_TYPE} PRIMARY KEY,
+            notification_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            reply_text TEXT NOT NULL,
+            replied_at TEXT NOT NULL,
+            FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE CASCADE
+        )
+    """))
     try:
         if _is_pg:
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS token_id TEXT DEFAULT ''")
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS max_devices INTEGER DEFAULT 1")
         else:
-            cur.execute("ALTER TABLE users ADD COLUMN token_id TEXT DEFAULT ''")
+            try:
+                cur.execute("ALTER TABLE users ADD COLUMN token_id TEXT DEFAULT ''")
+            except Exception:
+                pass
             try:
                 cur.execute("ALTER TABLE users ADD COLUMN max_devices INTEGER DEFAULT 1")
             except Exception:
@@ -486,3 +524,181 @@ def delete_banner_pixmap(side):
     conn.commit()
     cur.close()
     conn.close()
+
+
+def get_setting(key, default=None):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("SELECT value FROM settings WHERE key = %s"), (key,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row or row[0] is None:
+        return default
+    return row[0]
+
+
+def set_setting(key, value):
+    conn = _conn()
+    cur = conn.cursor()
+    if _is_pg:
+        cur.execute(
+            _q("INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"),
+            (key, value),
+        )
+    else:
+        cur.execute(
+            _q("INSERT OR REPLACE INTO settings (key, value) VALUES (%s, %s)"),
+            (key, value),
+        )
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("Setting %s = %s", key, value)
+
+
+def get_subscription_required():
+    """Whether a subscription is required to use the app (global toggle, default on)."""
+    value = get_setting("subscription_required", "1")
+    return str(value).lower() in ("1", "true", "yes", "on")
+
+
+def set_subscription_required(enabled):
+    set_setting("subscription_required", "1" if enabled else "0")
+
+
+def create_notification(ntype, text, link_url="", link_label="", question=""):
+    conn = _conn()
+    cur = conn.cursor()
+    now = datetime.now().isoformat(timespec="seconds")
+    if _is_pg:
+        cur.execute(
+            _q("INSERT INTO notifications (type, text, link_url, link_label, question, created_at) "
+               "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id"),
+            (ntype, text, link_url, link_label, question, now),
+        )
+        nid = cur.fetchone()[0]
+    else:
+        cur.execute(
+            _q("INSERT INTO notifications (type, text, link_url, link_label, question, created_at) VALUES (%s, %s, %s, %s, %s, %s)"),
+            (ntype, text, link_url, link_label, question, now),
+        )
+        nid = cur.lastrowid
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("تم إنشاء إشعار id=%s type=%s", nid, ntype)
+    return nid
+
+
+def get_notifications_for_user(username):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q(
+        "SELECT n.*, EXISTS(SELECT 1 FROM notification_reads r WHERE r.notification_id = n.id AND r.username = %s) AS is_read "
+        "FROM notifications n ORDER BY n.id DESC"
+    ), (username,))
+    rows = cur.fetchall()
+    result = []
+    for r in rows:
+        d = _dict_row(cur, r)
+        d["is_read"] = bool(d.get("is_read"))
+        result.append(d)
+    cur.close()
+    conn.close()
+    return result
+
+
+def get_unread_notifications_count(username):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q(
+        "SELECT COUNT(*) FROM notifications n "
+        "WHERE NOT EXISTS (SELECT 1 FROM notification_reads r WHERE r.notification_id = n.id AND r.username = %s)"
+    ), (username,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row[0] if row else 0
+
+
+def mark_notification_read(notification_id, username):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(
+        _q("INSERT INTO notification_reads (notification_id, username, read_at) VALUES (%s, %s, %s) "
+           "ON CONFLICT (notification_id, username) DO UPDATE SET read_at = EXCLUDED.read_at"),
+        (notification_id, username, datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def mark_all_notifications_read(username):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("SELECT id FROM notifications"))
+    rows = cur.fetchall()
+    now = datetime.now().isoformat(timespec="seconds")
+    for r in rows:
+        cur.execute(
+            _q("INSERT INTO notification_reads (notification_id, username, read_at) VALUES (%s, %s, %s) "
+               "ON CONFLICT (notification_id, username) DO UPDATE SET read_at = EXCLUDED.read_at"),
+            (r[0], username, now),
+        )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def add_notification_reply(notification_id, username, reply_text):
+    conn = _conn()
+    cur = conn.cursor()
+    now = datetime.now().isoformat(timespec="seconds")
+    if _is_pg:
+        cur.execute(
+            _q("INSERT INTO notification_replies (notification_id, username, reply_text, replied_at) "
+               "VALUES (%s, %s, %s, %s) RETURNING id"),
+            (notification_id, username, reply_text, now),
+        )
+        rid = cur.fetchone()[0]
+    else:
+        cur.execute(
+            _q("INSERT INTO notification_replies (notification_id, username, reply_text, replied_at) VALUES (%s, %s, %s, %s)"),
+            (notification_id, username, reply_text, now),
+        )
+        rid = cur.lastrowid
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("رد جديد على إشعار %s من %s", notification_id, username)
+    return rid
+
+
+def get_notification_replies():
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q(
+        "SELECT r.id, r.notification_id, r.username, r.reply_text, r.replied_at, "
+        "u.shop_name, n.text AS notification_text, n.question AS notification_question "
+        "FROM notification_replies r "
+        "LEFT JOIN users u ON u.username = r.username "
+        "LEFT JOIN notifications n ON n.id = r.notification_id "
+        "ORDER BY r.id DESC"
+    ))
+    rows = cur.fetchall()
+    result = [_dict_row(cur, r) for r in rows]
+    cur.close()
+    conn.close()
+    return result
+
+
+def delete_notification_reply(reply_id):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("DELETE FROM notification_replies WHERE id = %s"), (reply_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    logger.info("تم حذف رد الإشعار %s", reply_id)
