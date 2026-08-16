@@ -1,19 +1,20 @@
 import logging
 import os
 import sys
+import webbrowser
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
                                QPushButton, QLabel, QHBoxLayout,
                                QStackedWidget, QLineEdit, QMessageBox,
                                QTableWidget, QTableWidgetItem, QHeaderView,
                                QFileDialog, QInputDialog, QDateEdit, QFrame,
-                               QDialog, QApplication, QProgressBar)
+                               QDialog, QApplication, QProgressBar,
+                               QComboBox, QPlainTextEdit)
 from PySide6.QtGui import QAction
-from PySide6.QtCore import Qt, QSize, Signal, QDate
+from PySide6.QtCore import Qt, QSize, Signal, QDate, QTimer
 from PySide6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QBrush, QFont
 from PySide6.QtWidgets import QGraphicsDropShadowEffect
 from datetime import date, timedelta
 
-APP_VERSION = "1.1.2"  # bump when building a new EXE
 from ui.a4_editor import A4Editor
 from ui.photo_editor import PhotoEditor
 from ui.pdf_editor import PdfEditor
@@ -181,9 +182,10 @@ class MainWindow(QMainWindow):
             self._users = {}
             self._api_data = None
         else:
-            from core.database import init_db, load_users, save_user
+            from core.database import init_db, load_users, save_user, get_subscription_required
             init_db()
             self._users = load_users()
+            self._subscription_required = get_subscription_required()
         if not use_api:
             if "ahmed" not in self._users:
                 self._users["ahmed"] = {
@@ -204,6 +206,7 @@ class MainWindow(QMainWindow):
         self._username = ""
         self._display_name = ""
         self._is_admin = False
+        self._subscription_required = True
         self._search_date_active = False
         self._prev_page_index = 0
         self._stack = QStackedWidget()
@@ -236,8 +239,22 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._subscription_widget)
         self._my_subs_widget = self._build_my_subscriptions_page()
         self._stack.addWidget(self._my_subs_widget)
+        self._notifications_widget = self._build_notifications_page()
+        self._stack.addWidget(self._notifications_widget)
+        self._replies_widget = self._build_notification_replies_page()
+        self._stack.addWidget(self._replies_widget)
+
+        self._shown_notif_ids = set()
+        self._notif_queue = []
+        self._notif_list = []
+        self._notif_unread = 0
+        self._notif_timer = QTimer(self)
+        self._notif_timer.setInterval(60000)
+        self._notif_timer.timeout.connect(self._on_notif_timer)
 
         self._update_banners()
+
+        self._notif_timer.start()
 
         if use_api:
             self._try_restore_session()
@@ -258,6 +275,21 @@ class MainWindow(QMainWindow):
  
         top_row = QHBoxLayout()
         top_row.setAlignment(Qt.AlignLeft)
+
+        self._notif_btn = QPushButton("🔔 إشعارات")
+        self._notif_btn.setFixedHeight(34)
+        self._notif_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(230, 126, 34, 220); color: white;
+                font-size: 13px; font-weight: bold; border: none;
+                border-radius: 17px; padding: 0 16px;
+            }
+            QPushButton:hover { background: rgba(211, 84, 0, 220); }
+        """)
+        self._notif_btn.clicked.connect(self._open_notifications_page)
+        self._notif_btn.hide()
+        top_row.addWidget(self._notif_btn)
+
         top_row.addStretch()
 
         profile_label = ClickableLabel()
@@ -699,11 +731,11 @@ class MainWindow(QMainWindow):
         self._username = username
         self._display_name = sess.get("display_name", username)
         self._is_admin = sess.get("is_admin", False)
+        self._subscription_required = bool(qdata.get("subscription_required", True))
         self._api_data = qdata
         self._update_auth_ui()
         self._switch_to_main()
-        if self._is_admin:
-            self._update_banners()
+        self._update_banners()
         if not self._is_admin:
             pend = qdata.get("pending_messages", [])
             if pend:
@@ -712,8 +744,8 @@ class MainWindow(QMainWindow):
                     f"تم زيادة عدد أيام اشتراكك وأصبحت {rem} يوم")
                 from core.database import api_clear_pending
                 api_clear_pending()
+        self._load_notifications()
         logger.info("استعادة جلسة سابقة: %s", username)
-        self._check_for_updates()
         return True
 
     def _on_session_expired(self):
@@ -732,6 +764,7 @@ class MainWindow(QMainWindow):
             from core.database import load_users
             self._users = load_users()
             self._switch_to_main()
+            self._load_notifications()
             logger.info("تحديث بيانات المستخدمين من قاعدة البيانات المحلية")
             return
         from core.database import api_check_auth
@@ -742,6 +775,7 @@ class MainWindow(QMainWindow):
         self._api_data = qdata
         self._display_name = qdata.get("shop_name", self._username)
         self._is_admin = qdata.get("is_admin", False)
+        self._subscription_required = bool(qdata.get("subscription_required", True))
         self._update_auth_ui()
         self._switch_to_main()
         self._update_banners()
@@ -754,29 +788,8 @@ class MainWindow(QMainWindow):
                 from core.database import api_clear_pending
                 api_clear_pending()
         self._save_session()
-        self._check_for_updates()
+        self._load_notifications()
         logger.info("تحديث بيانات المستخدم: %s", self._username)
-
-    def _check_for_updates(self):
-        if not self._use_api:
-            return
-        import webbrowser
-        from core.database import api_check_version
-        vdata, verr = api_check_version()
-        if verr:
-            logger.warning("فشل التحقق من التحديث: %s", verr)
-            return
-        remote_version = vdata.get("version", "")
-        if remote_version and remote_version != APP_VERSION:
-            reply = QMessageBox.question(self, "تحديث متوفر",
-                f"يوجد إصدار جديد ({remote_version}) من التطبيق.\n"
-                "هل تريد تحميل التحديث الآن؟",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-            if reply == QMessageBox.Yes:
-                webbrowser.open(vdata.get("download_url", ""))
-                logger.info("فتح رابط التحميل: %s", vdata.get("download_url", ""))
-        else:
-            logger.info("التطبيق محدث (الإصدار %s)", APP_VERSION)
 
     def _login_submit(self, eng_user, password):
         username = eng_user.text().strip()
@@ -811,6 +824,7 @@ class MainWindow(QMainWindow):
             qdata, qerr = api_check_auth()
             if qdata:
                 self._api_data = qdata
+                self._subscription_required = bool(qdata.get("subscription_required", True))
             self._update_auth_ui()
             self._switch_to_main()
             self._update_banners()
@@ -822,8 +836,8 @@ class MainWindow(QMainWindow):
                         f"تم زيادة عدد أيام اشتراكك وأصبحت {rem} يوم")
                     api_clear_pending()
             self._save_session()
+            self._load_notifications()
             logger.info("تسجيل دخول API: %s", username)
-            self._check_for_updates()
             return
         if username not in self._users:
             self._login_spinner.hide()
@@ -843,6 +857,7 @@ class MainWindow(QMainWindow):
         self._switch_to_main()
         self._show_subscription_warning()
         self._check_pending_notifications()
+        self._load_notifications()
         logger.info("تسجيل دخول ناجح: %s", username)
 
     def _register_submit(self, fields):
@@ -918,6 +933,8 @@ class MainWindow(QMainWindow):
             "subscriptions": [],
         }
         self._save_user(data["english_name"])
+        from core.database import mark_all_notifications_read
+        mark_all_notifications_read(data["english_name"])
         for line in fields.values():
             line.clear()
         self._register_spinner.hide()
@@ -1023,6 +1040,7 @@ class MainWindow(QMainWindow):
             self._dashboard_main_btn.hide()
             self._welcome_label.hide()
             self._profile_label.hide()
+        self._update_notif_badge()
         logger.info("العودة إلى الشاشة الرئيسية")
 
     def _compute_subscription_days(self, user=None, username=None):
@@ -1097,6 +1115,8 @@ class MainWindow(QMainWindow):
     def _require_subscription(self):
         if self._is_admin:
             return True
+        if not self._subscription_required:
+            return True
         if self._use_api:
             if self._compute_subscription_days() <= 0:
                 QMessageBox.warning(self, "تنبيه", _NO_SUB_MSG)
@@ -1113,6 +1133,8 @@ class MainWindow(QMainWindow):
 
     def _check_section_access(self):
         if self._is_admin:
+            return True
+        if not self._subscription_required:
             return True
         if self._use_api:
             remaining = self._compute_subscription_days()
@@ -1132,6 +1154,8 @@ class MainWindow(QMainWindow):
 
     def _show_subscription_warning(self):
         if self._is_admin:
+            return
+        if not self._subscription_required:
             return
         if self._use_api:
             remaining = self._compute_subscription_days()
@@ -1323,9 +1347,751 @@ class MainWindow(QMainWindow):
         btn_settings.clicked.connect(self._open_notifier_settings)
         layout.addWidget(btn_settings, 0, Qt.AlignCenter)
 
+        self._sub_toggle_btn = QPushButton()
+        self._sub_toggle_btn.setCheckable(True)
+        self._sub_toggle_btn.clicked.connect(self._toggle_subscription_required)
+        layout.addWidget(self._sub_toggle_btn, 0, Qt.AlignCenter)
+        self._update_sub_toggle_btn()
+
+        admin_notif_row = QHBoxLayout()
+        admin_notif_row.setAlignment(Qt.AlignCenter)
+        admin_notif_row.setSpacing(12)
+
+        btn_send_notif = QPushButton("📢 إرسال اشعار")
+        btn_send_notif.setStyleSheet("""
+            QPushButton {
+                background: #27ae60; color: white; font-size: 14px;
+                padding: 8px 25px; border-radius: 6px; border: none;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #229954; }
+        """)
+        btn_send_notif.clicked.connect(self._open_send_notification_dialog)
+        admin_notif_row.addWidget(btn_send_notif)
+
+        self._btn_replies = QPushButton("💬 ردود الاشعارات")
+        self._btn_replies.setStyleSheet("""
+            QPushButton {
+                background: #e67e22; color: white; font-size: 14px;
+                padding: 8px 25px; border-radius: 6px; border: none;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #d35400; }
+        """)
+        self._btn_replies.clicked.connect(self._open_notification_replies_page)
+        admin_notif_row.addWidget(self._btn_replies)
+
+        layout.addLayout(admin_notif_row)
+
         widget.setObjectName("dashboardPage")
         widget.setStyleSheet("#dashboardPage { background: #cceeff; }")
         return widget
+
+    def _update_sub_toggle_btn(self):
+        if not hasattr(self, "_sub_toggle_btn"):
+            return
+        if self._subscription_required:
+            self._sub_toggle_btn.setText("🔒 إلزامية الاشتراك: مفعّلة")
+            self._sub_toggle_btn.setChecked(True)
+            self._sub_toggle_btn.setStyleSheet("""
+                QPushButton {
+                    background: #27ae60; color: white; font-size: 14px;
+                    padding: 8px 25px; border-radius: 6px; border: none;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background: #229954; }
+            """)
+        else:
+            self._sub_toggle_btn.setText("🔓 إلزامية الاشتراك: معطّلة")
+            self._sub_toggle_btn.setChecked(False)
+            self._sub_toggle_btn.setStyleSheet("""
+                QPushButton {
+                    background: #95a5a6; color: white; font-size: 14px;
+                    padding: 8px 25px; border-radius: 6px; border: none;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background: #7f8c8d; }
+            """)
+
+    def _toggle_subscription_required(self):
+        target = not self._subscription_required
+        if self._use_api:
+            from core.database import api_set_subscription_required
+            data, err = api_set_subscription_required(target)
+            if err:
+                QMessageBox.critical(self, "خطأ", f"تعذر الحفظ: {err}")
+                self._update_sub_toggle_btn()
+                return
+            logger.info("تم تحديث إلزامية الاشتراك (سيرفر): %s", target)
+        else:
+            from core.database import set_subscription_required
+            set_subscription_required(target)
+            logger.info("تم تحديث إلزامية الاشتراك (محلي): %s", target)
+        self._subscription_required = target
+        self._update_sub_toggle_btn()
+        if not target:
+            QMessageBox.information(self, "تم", "تم إلغاء إلزامية الاشتراك. جميع الأقسام متاحة الآن للجميع.")
+        else:
+            QMessageBox.information(self, "تم", "تم تفعيل إلزامية الاشتراك.")
+
+    def _update_notif_badge(self):
+        if not hasattr(self, "_notif_btn"):
+            return
+        if self._logged_in:
+            self._notif_btn.show()
+            if self._notif_unread > 0:
+                self._notif_btn.setText(f"🔔 إشعارات ({self._notif_unread})")
+            else:
+                self._notif_btn.setText("🔔 إشعارات")
+        else:
+            self._notif_btn.hide()
+
+    def _load_notifications(self):
+        if not self._logged_in:
+            return
+        if self._use_api:
+            from core.database import api_get_notifications
+            data, err = api_get_notifications()
+            if err or data is None:
+                return
+            self._notif_list = data.get("notifications", [])
+            self._notif_unread = data.get("unread_count", 0)
+        else:
+            from core.database import get_notifications_for_user, get_unread_notifications_count
+            self._notif_list = get_notifications_for_user(self._username)
+            self._notif_unread = get_unread_notifications_count(self._username)
+        self._update_notif_badge()
+        if not self._is_admin:
+            self._enqueue_new_notifications()
+
+    def _enqueue_new_notifications(self):
+        new = [n for n in self._notif_list
+               if not n.get("is_read") and n.get("id") not in self._shown_notif_ids]
+        if new:
+            self._notif_queue.extend(new)
+            self._process_notif_queue()
+
+    def _process_notif_queue(self):
+        while self._notif_queue:
+            notif = self._notif_queue.pop(0)
+            self._show_notification_popup(notif)
+
+    def _mark_notif_read(self, nid):
+        for n in self._notif_list:
+            if n.get("id") == nid and not n.get("is_read"):
+                n["is_read"] = True
+                if self._use_api:
+                    from core.database import api_mark_notifications_read
+                    api_mark_notifications_read(notification_id=nid)
+                else:
+                    from core.database import mark_notification_read
+                    mark_notification_read(nid, self._username)
+                break
+        self._notif_unread = sum(1 for n in self._notif_list if not n.get("is_read"))
+        self._update_notif_badge()
+
+    def _mark_all_read(self):
+        if self._use_api:
+            from core.database import api_mark_notifications_read
+            api_mark_notifications_read(mark_all=True)
+        else:
+            from core.database import mark_all_notifications_read
+            mark_all_notifications_read(self._username)
+        for n in self._notif_list:
+            n["is_read"] = True
+        self._notif_unread = 0
+        self._update_notif_badge()
+        self._refresh_notifications_list()
+
+    def _on_notif_timer(self):
+        if not self._logged_in or self._is_admin:
+            return
+        self._load_notifications()
+
+    def _show_notification_popup(self, notif):
+        nid = notif.get("id")
+        ntype = notif.get("type", "plain")
+        self._shown_notif_ids.add(nid)
+        self._mark_notif_read(nid)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("اشعار جديد")
+        dialog.setMinimumWidth(440)
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(12)
+
+        title = QLabel("📢 اشعار جديد")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #e67e22;")
+        layout.addWidget(title)
+
+        text = QLabel(notif.get("text", ""))
+        text.setWordWrap(True)
+        text.setAlignment(Qt.AlignCenter)
+        text.setStyleSheet("font-size: 15px; color: #333; padding: 8px;")
+        layout.addWidget(text)
+
+        if ntype == "link":
+            link_label = notif.get("link_label") or "اضغط هنا"
+            link_url = notif.get("link_url", "")
+            link_btn = QPushButton(link_label)
+            link_btn.setStyleSheet("""
+                QPushButton {
+                    background: #1a73e8; color: white; font-size: 15px;
+                    padding: 8px 30px; border-radius: 8px; border: none;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background: #1557b0; }
+            """)
+            link_btn.clicked.connect(lambda: webbrowser.open(link_url or ""))
+            layout.addWidget(link_btn, 0, Qt.AlignCenter)
+
+        if ntype == "question":
+            question = notif.get("question") or "أجب على السؤال التالي"
+            q_label = QLabel(question)
+            q_label.setWordWrap(True)
+            q_label.setAlignment(Qt.AlignCenter)
+            q_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #8e44ad; padding: 6px;")
+            layout.addWidget(q_label)
+
+            reply_edit = QLineEdit()
+            reply_edit.setPlaceholderText("اكتب ردك هنا...")
+            reply_edit.setStyleSheet("""
+                QLineEdit {
+                    font-size: 14px; padding: 8px; border: 2px solid #ddd;
+                    border-radius: 8px;
+                }
+            """)
+            layout.addWidget(reply_edit)
+
+            send_btn = QPushButton("إرسال الرد")
+            send_btn.setStyleSheet("""
+                QPushButton {
+                    background: #27ae60; color: white; font-size: 14px;
+                    padding: 8px 30px; border-radius: 8px; border: none;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background: #229954; }
+            """)
+            send_btn.clicked.connect(lambda: self._submit_notification_reply(nid, dialog, reply_edit))
+            layout.addWidget(send_btn, 0, Qt.AlignCenter)
+
+        close_btn = QPushButton("إغلاق")
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background: #95a5a6; color: white; font-size: 13px;
+                padding: 6px 25px; border-radius: 8px; border: none;
+            }
+            QPushButton:hover { background: #7f8c8d; }
+        """)
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn, 0, Qt.AlignCenter)
+
+        logger.info("عرض اشعار منبثق id=%s type=%s", nid, ntype)
+        dialog.exec()
+        self._process_notif_queue()
+
+    def _submit_notification_reply(self, nid, dialog, reply_edit):
+        text = reply_edit.text().strip()
+        if not text:
+            QMessageBox.warning(dialog, "تنبيه", "اكتب ردك قبل الإرسال")
+            return
+        if self._use_api:
+            from core.database import api_reply_notification
+            _, err = api_reply_notification(nid, text)
+            if err:
+                QMessageBox.critical(dialog, "خطأ", err)
+                return
+        else:
+            from core.database import add_notification_reply
+            add_notification_reply(nid, self._username, text)
+        QMessageBox.information(dialog, "تم", "تم إرسال ردك بنجاح")
+        dialog.accept()
+
+    def _build_notifications_page(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        top = QHBoxLayout()
+        back_btn = QPushButton("← رجوع")
+        back_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent; color: #e67e22; font-size: 14px;
+                border: none; font-weight: bold; padding: 5px;
+            }
+            QPushButton:hover { color: #d35400; }
+        """)
+        back_btn.clicked.connect(self._notifications_back)
+        top.addWidget(back_btn)
+        top.addStretch()
+        layout.addLayout(top)
+
+        header = QLabel("الاشعارات")
+        header.setAlignment(Qt.AlignCenter)
+        header.setStyleSheet("font-size: 22px; font-weight: bold; color: #e67e22; margin-bottom: 10px;")
+        layout.addWidget(header)
+
+        self._notif_table = QTableWidget()
+        self._notif_table.setColumnCount(5)
+        self._notif_table.setHorizontalHeaderLabels(["النوع", "النص", "التاريخ", "الحالة", "إجراء"])
+        self._notif_table.horizontalHeader().setStretchLastSection(True)
+        self._notif_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._notif_table.setAlternatingRowColors(True)
+        self._notif_table.setStyleSheet("""
+            QTableWidget { font-size: 13px; border: 1px solid #ddd; border-radius: 8px; }
+            QHeaderView::section { background: #e67e22; color: white; font-weight: bold; padding: 6px; border: none; }
+        """)
+        layout.addWidget(self._notif_table)
+
+        mark_btn = QPushButton("✅ تحديد الكل كمقروء")
+        mark_btn.setStyleSheet("""
+            QPushButton {
+                background: #1a73e8; color: white; font-size: 14px;
+                padding: 8px 25px; border-radius: 6px; border: none;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #1557b0; }
+        """)
+        mark_btn.clicked.connect(self._mark_all_read)
+        layout.addWidget(mark_btn, 0, Qt.AlignCenter)
+
+        widget.setObjectName("notifPage")
+        widget.setStyleSheet("#notifPage { background: #cceeff; }")
+        return widget
+
+    def _refresh_notifications_list(self):
+        self._notif_table.setRowCount(0)
+        type_names = {"link": "🔗 رابط", "question": "❓ سؤال", "plain": "📄 نص"}
+        for i, n in enumerate(self._notif_list):
+            self._notif_table.insertRow(i)
+            self._notif_table.setItem(i, 0, QTableWidgetItem(type_names.get(n.get("type", ""), "")))
+            self._notif_table.setItem(i, 1, QTableWidgetItem(n.get("text", "")))
+            created = n.get("created_at", "")
+            if len(created) >= 16:
+                created = created[:16].replace("T", " ")
+            self._notif_table.setItem(i, 2, QTableWidgetItem(created))
+            status_item = QTableWidgetItem("مقروء" if n.get("is_read") else "جديد")
+            status_item.setForeground(QColor(Qt.gray) if n.get("is_read") else QColor("#e67e22"))
+            self._notif_table.setItem(i, 3, status_item)
+            action_btns = []
+            if n.get("type") == "link":
+                btn = QPushButton("فتح الرابط")
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background: #1a73e8; color: white; font-size: 12px;
+                        padding: 4px 12px; border-radius: 6px; border: none;
+                    }
+                    QPushButton:hover { background: #1557b0; }
+                """)
+                btn.clicked.connect(lambda checked, url=n.get("link_url", ""): webbrowser.open(url or ""))
+                action_btns.append(btn)
+            elif n.get("type") == "question":
+                btn = QPushButton("رد")
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background: #27ae60; color: white; font-size: 12px;
+                        padding: 4px 16px; border-radius: 6px; border: none;
+                    }
+                    QPushButton:hover { background: #229954; }
+                """)
+                btn.clicked.connect(lambda checked, nid=n.get("id"): self._open_reply_dialog(nid))
+                action_btns.append(btn)
+            if self._is_admin:
+                del_btn = QPushButton("🗑️ حذف")
+                del_btn.setStyleSheet("""
+                    QPushButton {
+                        background: #e74c3c; color: white; font-size: 12px;
+                        padding: 4px 12px; border-radius: 6px; border: none;
+                    }
+                    QPushButton:hover { background: #c0392b; }
+                """)
+                del_btn.clicked.connect(lambda checked, nid=n.get("id"): self._delete_notification(nid))
+                action_btns.append(del_btn)
+            if action_btns:
+                container = QWidget()
+                row_layout = QHBoxLayout(container)
+                row_layout.setContentsMargins(2, 2, 2, 2)
+                row_layout.setSpacing(6)
+                row_layout.addStretch()
+                for b in action_btns:
+                    row_layout.addWidget(b)
+                row_layout.addStretch()
+                self._notif_table.setCellWidget(i, 4, container)
+
+    def _delete_notification(self, nid):
+        reply = QMessageBox.question(
+            self, "حذف الإشعار",
+            "سيتم حذف هذا الإشعار نهائياً ولن يظهر لأي مستخدم. هل أنت متأكد؟",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        if self._use_api:
+            from core.database import api_delete_notification
+            _, err = api_delete_notification(nid)
+            if err:
+                QMessageBox.critical(self, "خطأ", f"تعذر الحذف: {err}")
+                return
+        else:
+            from core.database import delete_notification
+            delete_notification(nid)
+        self._shown_notif_ids.discard(nid)
+        self._load_notifications()
+        self._refresh_notifications_list()
+        logger.info("حذف الإشعار %s", nid)
+
+    def _open_reply_dialog(self, nid):
+        notif = next((n for n in self._notif_list if n.get("id") == nid), None)
+        if not notif:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("الرد على الإشعار")
+        dialog.setMinimumWidth(440)
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(12)
+        q = QLabel(notif.get("question") or notif.get("text", ""))
+        q.setWordWrap(True)
+        q.setAlignment(Qt.AlignCenter)
+        q.setStyleSheet("font-size: 15px; font-weight: bold; color: #8e44ad;")
+        layout.addWidget(q)
+        reply_edit = QLineEdit()
+        reply_edit.setPlaceholderText("اكتب ردك هنا...")
+        reply_edit.setStyleSheet("""
+            QLineEdit {
+                font-size: 14px; padding: 8px; border: 2px solid #ddd;
+                border-radius: 8px;
+            }
+        """)
+        layout.addWidget(reply_edit)
+        send_btn = QPushButton("إرسال الرد")
+        send_btn.setStyleSheet("""
+            QPushButton {
+                background: #27ae60; color: white; font-size: 14px;
+                padding: 8px 30px; border-radius: 8px; border: none;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #229954; }
+        """)
+        send_btn.clicked.connect(lambda: self._submit_notification_reply(nid, dialog, reply_edit))
+        layout.addWidget(send_btn, 0, Qt.AlignCenter)
+        cancel_btn = QPushButton("إلغاء")
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background: #95a5a6; color: white; font-size: 13px;
+                padding: 6px 25px; border-radius: 8px; border: none;
+            }
+            QPushButton:hover { background: #7f8c8d; }
+        """)
+        cancel_btn.clicked.connect(dialog.reject)
+        layout.addWidget(cancel_btn, 0, Qt.AlignCenter)
+        dialog.exec()
+
+    def _open_notifications_page(self):
+        self._prev_page_index = self._stack.currentIndex()
+        self._refresh_notifications_list()
+        self._stack.setCurrentWidget(self._notifications_widget)
+        self.setWindowTitle("ورشة طباعة - الاشعارات")
+        if not self._is_admin:
+            self._mark_all_read()
+        logger.info("فتح صفحة الاشعارات")
+
+    def _notifications_back(self):
+        self._stack.setCurrentIndex(self._prev_page_index)
+        self.setWindowTitle("ورشة طباعة")
+        logger.info("رجوع من صفحة الاشعارات")
+
+    def _open_send_notification_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("إرسال اشعار")
+        dialog.setMinimumWidth(480)
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(12)
+
+        title = QLabel("📢 إرسال اشعار جديد")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #e67e22;")
+        layout.addWidget(title)
+
+        type_combo = QComboBox()
+        type_combo.addItem("📄 نص بدون رابط أو سؤال", "plain")
+        type_combo.addItem("🔗 نص مع رابط مخفي", "link")
+        type_combo.addItem("❓ نص مع سؤال ورد", "question")
+        layout.addWidget(QLabel("نوع الإشعار:"))
+        layout.addWidget(type_combo)
+
+        text_edit = QPlainTextEdit()
+        text_edit.setPlaceholderText("نص الإشعار...")
+        text_edit.setMaximumHeight(90)
+        layout.addWidget(QLabel("النص:"))
+        layout.addWidget(text_edit)
+
+        link_label_edit = QLineEdit()
+        link_label_edit.setPlaceholderText("الكلمة الظاهرة التي يضغط عليها المستخدم (مثال: اضغط هنا)")
+        link_url_edit = QLineEdit()
+        link_url_edit.setPlaceholderText("الرابط الفعلي (لا يظهر للمستخدم)")
+        link_box = QWidget()
+        lk = QVBoxLayout(link_box)
+        lk.setContentsMargins(0, 0, 0, 0)
+        lk.setSpacing(6)
+        lk.addWidget(QLabel("الكلمة الظاهرة:"))
+        lk.addWidget(link_label_edit)
+        lk.addWidget(QLabel("الرابط (مخفي):"))
+        lk.addWidget(link_url_edit)
+        layout.addWidget(link_box)
+
+        question_edit = QLineEdit()
+        question_edit.setPlaceholderText("السؤال الذي سيُعرض مع حقل الرد")
+        q_box = QWidget()
+        qb = QVBoxLayout(q_box)
+        qb.setContentsMargins(0, 0, 0, 0)
+        qb.setSpacing(6)
+        qb.addWidget(QLabel("السؤال:"))
+        qb.addWidget(question_edit)
+        layout.addWidget(q_box)
+
+        link_box.hide()
+        q_box.hide()
+
+        def _on_type(idx):
+            ntype = type_combo.itemData(idx)
+            link_box.setVisible(ntype == "link")
+            q_box.setVisible(ntype == "question")
+        type_combo.currentIndexChanged.connect(_on_type)
+
+        send_btn = QPushButton("📨 إرسال")
+        send_btn.setStyleSheet("""
+            QPushButton {
+                background: #27ae60; color: white; font-size: 14px;
+                padding: 8px 35px; border-radius: 8px; border: none;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #229954; }
+        """)
+        send_btn.clicked.connect(lambda: self._send_notification(
+            dialog, type_combo, text_edit, link_label_edit, link_url_edit, question_edit))
+        layout.addWidget(send_btn, 0, Qt.AlignCenter)
+
+        cancel_btn = QPushButton("إلغاء")
+        cancel_btn.setStyleSheet("""
+            QPushButton {
+                background: #95a5a6; color: white; font-size: 13px;
+                padding: 6px 25px; border-radius: 8px; border: none;
+            }
+            QPushButton:hover { background: #7f8c8d; }
+        """)
+        cancel_btn.clicked.connect(dialog.reject)
+        layout.addWidget(cancel_btn, 0, Qt.AlignCenter)
+
+        dialog.exec()
+
+    def _send_notification(self, dialog, type_combo, text_edit, link_label_edit,
+                           link_url_edit, question_edit):
+        ntype = type_combo.itemData(type_combo.currentIndex())
+        text = text_edit.toPlainText().strip()
+        link_label = link_label_edit.text().strip()
+        link_url = link_url_edit.text().strip()
+        question = question_edit.text().strip()
+        if not text:
+            QMessageBox.warning(dialog, "تنبيه", "نص الإشعار مطلوب")
+            return
+        if ntype == "link" and not link_url:
+            QMessageBox.warning(dialog, "تنبيه", "أدخل الرابط الفعلي (مخفي)")
+            return
+        if ntype == "link" and not link_label:
+            link_label = "اضغط هنا"
+        if self._use_api:
+            from core.database import api_create_notification
+            _, err = api_create_notification(ntype, text, link_url, link_label, question)
+            if err:
+                QMessageBox.critical(dialog, "خطأ", err)
+                return
+        else:
+            from core.database import create_notification
+            create_notification(ntype, text, link_url, link_label, question)
+        QMessageBox.information(dialog, "تم", "تم إرسال الإشعار لجميع المستخدمين")
+        dialog.accept()
+        logger.info("إرسال اشعار نوع=%s", ntype)
+
+    def _build_notification_replies_page(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        top = QHBoxLayout()
+        back_btn = QPushButton("← رجوع")
+        back_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent; color: #e67e22; font-size: 14px;
+                border: none; font-weight: bold; padding: 5px;
+            }
+            QPushButton:hover { color: #d35400; }
+        """)
+        back_btn.clicked.connect(self._replies_back)
+        top.addWidget(back_btn)
+        top.addStretch()
+        layout.addLayout(top)
+
+        header = QLabel("ردود الاشعارات")
+        header.setAlignment(Qt.AlignCenter)
+        header.setStyleSheet("font-size: 22px; font-weight: bold; color: #e67e22; margin-bottom: 10px;")
+        layout.addWidget(header)
+
+        self._replies_table = QTableWidget()
+        self._replies_table.setColumnCount(6)
+        self._replies_table.setHorizontalHeaderLabels(["المستخدم", "اسم المكتبة", "الإشعار", "الرد", "التاريخ", "إجراء"])
+        self._replies_table.horizontalHeader().setStretchLastSection(True)
+        self._replies_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._replies_table.setAlternatingRowColors(True)
+        self._replies_table.setStyleSheet("""
+            QTableWidget { font-size: 13px; border: 1px solid #ddd; border-radius: 8px; }
+            QHeaderView::section { background: #e67e22; color: white; font-weight: bold; padding: 6px; border: none; }
+        """)
+        self._replies_table.cellClicked.connect(self._on_replies_cell_clicked)
+        layout.addWidget(self._replies_table)
+
+        refresh_btn = QPushButton("🔄 تحديث")
+        refresh_btn.setStyleSheet("""
+            QPushButton {
+                background: #e67e22; color: white; font-size: 14px;
+                padding: 8px 25px; border-radius: 6px; border: none;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #d35400; }
+        """)
+        refresh_btn.clicked.connect(self._refresh_notification_replies)
+        layout.addWidget(refresh_btn, 0, Qt.AlignCenter)
+
+        widget.setObjectName("repliesPage")
+        widget.setStyleSheet("#repliesPage { background: #cceeff; }")
+        return widget
+
+    def _refresh_notification_replies(self):
+        self._replies_table.setRowCount(0)
+        if self._use_api:
+            from core.database import api_get_notification_replies
+            data, err = api_get_notification_replies()
+            if err:
+                QMessageBox.warning(self, "خطأ", err)
+                return
+            replies = data if isinstance(data, list) else []
+        else:
+            from core.database import get_notification_replies
+            replies = get_notification_replies()
+        for i, r in enumerate(replies):
+            self._replies_table.insertRow(i)
+            user_item = QTableWidgetItem(r.get("username", ""))
+            user_item.setForeground(QColor("#1a73e8"))
+            user_item.setToolTip("اضغط لعرض بيانات المستخدم")
+            self._replies_table.setItem(i, 0, user_item)
+            self._replies_table.setItem(i, 1, QTableWidgetItem(r.get("shop_name", "")))
+            self._replies_table.setItem(i, 2, QTableWidgetItem(r.get("notification_text", "")))
+            self._replies_table.setItem(i, 3, QTableWidgetItem(r.get("reply_text", "")))
+            replied = r.get("replied_at", "")
+            if len(replied) >= 16:
+                replied = replied[:16].replace("T", " ")
+            self._replies_table.setItem(i, 4, QTableWidgetItem(replied))
+            del_btn = QPushButton("🗑")
+            del_btn.setToolTip("حذف الرد")
+            del_btn.setFixedSize(28, 28)
+            del_btn.setStyleSheet("QPushButton { background: #e74c3c; color: white; border-radius: 14px; font-size: 12px; } QPushButton:hover { background: #c0392b; }")
+            del_btn.clicked.connect(lambda checked, rid=r.get("id"): self._delete_notification_reply(rid))
+            self._replies_table.setCellWidget(i, 5, del_btn)
+        logger.info("تحديث صفحة ردود الاشعارات: %d رد", self._replies_table.rowCount())
+
+    def _on_replies_cell_clicked(self, row, col):
+        if col == 0:
+            item = self._replies_table.item(row, col)
+            if item:
+                self._show_user_details_dialog(item.text())
+
+    def _delete_notification_reply(self, rid):
+        confirm = QMessageBox.question(self, "حذف الرد",
+            "هل أنت متأكد من حذف هذا الرد؟",
+            QMessageBox.Yes | QMessageBox.No)
+        if confirm != QMessageBox.Yes:
+            return
+        if self._use_api:
+            from core.database import api_delete_notification_reply
+            _, err = api_delete_notification_reply(rid)
+            if err:
+                QMessageBox.warning(self, "خطأ", err)
+                return
+        else:
+            from core.database import delete_notification_reply
+            delete_notification_reply(rid)
+        self._refresh_notification_replies()
+        logger.info("حذف رد الإشعار %s", rid)
+
+    def _open_notification_replies_page(self):
+        self._prev_page_index = self._stack.currentIndex()
+        self._refresh_notification_replies()
+        self._stack.setCurrentWidget(self._replies_widget)
+        self.setWindowTitle("ورشة طباعة - ردود الاشعارات")
+        logger.info("فتح صفحة ردود الاشعارات")
+
+    def _replies_back(self):
+        self._stack.setCurrentIndex(self._prev_page_index)
+        self.setWindowTitle("ورشة طباعة - لوحة تحكم المالك")
+        logger.info("رجوع من صفحة ردود الاشعارات")
+
+    def _show_user_details_dialog(self, username):
+        if self._use_api:
+            from core.database import api_get_user_details
+            data, err = api_get_user_details(username)
+            if err:
+                QMessageBox.warning(self, "خطأ", err)
+                return
+        else:
+            user = self._users.get(username)
+            if not user:
+                QMessageBox.warning(self, "خطأ", "المستخدم غير موجود")
+                return
+            data = {
+                "username": username,
+                "shop_name": user.get("shop_name", username),
+                "phone": user.get("phone", ""),
+                "reg_date": user.get("reg_date", ""),
+                "remaining_days": self._compute_subscription_days(username=username),
+                "subscriptions": user.get("subscriptions", []),
+                "active_sessions": 0,
+                "max_devices": 1,
+                "is_admin": bool(user.get("is_admin")),
+            }
+        lines = [
+            f"اسم المستخدم: {data.get('username')}",
+            f"اسم المكتبة: {data.get('shop_name')}",
+            f"رقم الهاتف: {data.get('phone')}",
+            f"تاريخ التسجيل: {data.get('reg_date')}",
+            f"الأيام المتبقية من الاشتراك: {data.get('remaining_days')}",
+            f"الأجهزة النشطة: {data.get('active_sessions')} / {data.get('max_devices')}",
+        ]
+        subs = data.get("subscriptions", [])
+        if subs:
+            lines.append("")
+            lines.append("سجل الاشتراكات:")
+            for s in subs:
+                lines.append(f"  - من {s.get('start')} إلى {s.get('end')} ({s.get('days')} يوم)")
+        else:
+            lines.append("")
+            lines.append("لا توجد اشتراكات مسجلة")
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"بيانات المستخدم {username}")
+        dialog.setMinimumWidth(460)
+        layout = QVBoxLayout(dialog)
+        label = QLabel("\n".join(lines))
+        label.setAlignment(Qt.AlignRight)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        label.setStyleSheet("font-size: 14px; color: #333; line-height: 1.6;")
+        layout.addWidget(label)
+        close_btn = QPushButton("إغلاق")
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background: #e67e22; color: white; font-size: 14px;
+                padding: 8px 30px; border-radius: 8px; border: none;
+            }
+            QPushButton:hover { background: #d35400; }
+        """)
+        close_btn.clicked.connect(dialog.accept)
+        layout.addWidget(close_btn, 0, Qt.AlignCenter)
+        dialog.exec()
 
     def _refresh_dashboard(self, search_text="", filter_date=None):
         self._dashboard_table.setRowCount(0)

@@ -21,3 +21,5 @@ def resize_to_card(image: Image.Image, dpi: int = TARGET_DPI) -> Image.Image:
     image.thumbnail(target, Image.LANCZOS)
     logger.info("تم تغيير الحجم إلى %s", image.size)
     return image
+
+

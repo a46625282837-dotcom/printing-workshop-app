@@ -88,24 +88,45 @@ def _request(method, path, **kwargs):
     fire_session_expired = kwargs.pop("_fire_session_expired", True)
     try:
         resp = requests.request(method, url, headers=_headers(), timeout=10, **kwargs)
+        body = resp.text or ""
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = None
         if resp.status_code >= 400:
-            err = resp.json()
-            err_msg = err.get("error", "خطأ في الاتصال")
-            if err.get("session_expired") and fire_session_expired:
-                set_token(None)
-                set_username(None)
-                if _session_expired_callback:
-                    _session_expired_callback()
+            if isinstance(payload, dict):
+                err_msg = payload.get("error", f"خطأ في الخادم ({resp.status_code})")
+                if payload.get("session_expired") and fire_session_expired:
+                    set_token(None)
+                    set_username(None)
+                    if _session_expired_callback:
+                        _session_expired_callback()
+                    return None, err_msg
+                logger.error("API error %s %s: %s", method, path, err_msg)
                 return None, err_msg
-            logger.error("API error %s %s: %s", method, path, err_msg)
-            return None, err_msg
-        return resp.json(), None
+            logger.error("API error %s %s: status %s", method, path, resp.status_code)
+            return None, _server_error_message(resp.status_code)
+        if payload is not None:
+            return payload, None
+        return None, _server_error_message(resp.status_code)
     except requests.ConnectionError:
         logger.error("Cannot connect to server at %s", _SERVER_URL)
         return None, "لا يمكن الاتصال بالخادم"
     except Exception as e:
         logger.error("API request failed: %s", e)
         return None, str(e)
+
+
+def _server_error_message(status):
+    if status == 404:
+        return "الخادم لا يتعرف على هذه العملية. تأكد من تحديث الخادم لأحدث إصدار ثم أعد المحاولة"
+    if status == 405:
+        return "الخادم لا يقبل هذه العملية. تأكد من تحديث الخادم لأحدث إصدار"
+    if status == 500:
+        return "حدث خطأ في الخادم (500). حاول مجدداً أو تواصل مع المالك"
+    if status == 502 or status == 503 or status == 504:
+        return "الخادم غير متاح حالياً. حاول بعد قليل"
+    return f"خطأ في الخادم ({status})"
 
 
 def _login_raw(username, password, **extra):
@@ -212,9 +233,6 @@ def logout():
     return _request("POST", "/api/auth/logout")
 
 
-def check_version():
-    return _request("GET", "/api/app/version")
-
 
 def get_user_sessions(username):
     return _request("GET", f"/api/users/{username}/sessions")
@@ -224,3 +242,52 @@ def set_max_devices(username, max_devices):
     return _request("POST", f"/api/users/{username}/max-devices", json={
         "max_devices": max_devices,
     })
+
+
+def get_settings():
+    return _request("GET", "/api/settings")
+
+
+def set_subscription_required(enabled):
+    return _request("POST", "/api/settings/subscription-required", json={
+        "enabled": bool(enabled),
+    })
+
+
+def get_notifications():
+    return _request("GET", "/api/notifications")
+
+
+def create_notification(ntype, text, link_url="", link_label="", question=""):
+    return _request("POST", "/api/notifications", json={
+        "type": ntype, "text": text, "link_url": link_url,
+        "link_label": link_label, "question": question,
+    })
+
+
+def mark_notification_read(notification_id=None, mark_all=False):
+    return _request("POST", "/api/notifications/read", json={
+        "notification_id": notification_id, "all": mark_all,
+    })
+
+
+def reply_notification(notification_id, reply_text):
+    return _request("POST", f"/api/notifications/{notification_id}/reply", json={
+        "reply_text": reply_text,
+    })
+
+
+def get_notification_replies():
+    return _request("GET", "/api/notifications/replies")
+
+
+def delete_notification_reply(reply_id):
+    return _request("DELETE", f"/api/notifications/replies/{reply_id}")
+
+
+def delete_notification(notification_id):
+    return _request("DELETE", f"/api/notifications/{notification_id}")
+
+
+def get_user_details(username):
+    return _request("GET", f"/api/users/{username}")

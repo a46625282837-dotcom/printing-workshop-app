@@ -3,7 +3,7 @@ import json
 import os
 import sys
 import logging
-from datetime import date
+from datetime import date, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,41 @@ def init_db():
             username TEXT NOT NULL,
             message TEXT NOT NULL,
             FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type TEXT NOT NULL,
+            text TEXT NOT NULL DEFAULT '',
+            link_url TEXT DEFAULT '',
+            link_label TEXT DEFAULT '',
+            question TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS notification_reads (
+            notification_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            read_at TEXT NOT NULL,
+            PRIMARY KEY (notification_id, username)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS notification_replies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            notification_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            reply_text TEXT NOT NULL,
+            replied_at TEXT NOT NULL,
+            FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE CASCADE
         )
     """)
     _migrate_old_subscriptions(conn)
@@ -244,11 +279,6 @@ def api_get_users():
     return api_client.get_users()
 
 
-def api_check_version():
-    from . import api_client
-    return api_client.check_version()
-
-
 def api_set_subscription(username, days):
     from . import api_client
     return api_client.set_subscription(username, days)
@@ -322,3 +352,205 @@ def api_get_user_sessions(username):
 def api_set_max_devices(username, max_devices):
     from . import api_client
     return api_client.set_max_devices(username, max_devices)
+
+
+def get_subscription_required():
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key = ?", ("subscription_required",)
+    ).fetchone()
+    conn.close()
+    if not row or row[0] is None:
+        return True
+    return str(row[0]).lower() in ("1", "true", "yes", "on")
+
+
+def set_subscription_required(enabled):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+        ("subscription_required", "1" if enabled else "0"),
+    )
+    conn.commit()
+    conn.close()
+    logger.info("تم تعيين إلزامية الاشتراك (محلي): %s", enabled)
+
+
+def api_get_subscription_required():
+    from . import api_client
+    data, err = api_client.get_settings()
+    if err or data is None:
+        return True, err
+    return bool(data.get("subscription_required", True)), None
+
+
+def api_set_subscription_required(enabled):
+    from . import api_client
+    return api_client.set_subscription_required(enabled)
+
+
+def create_notification(ntype, text, link_url="", link_label="", question=""):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        "INSERT INTO notifications (type, text, link_url, link_label, question, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (ntype, text, link_url, link_label, question,
+         datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    nid = cur.lastrowid
+    conn.close()
+    logger.info("تم إنشاء إشعار محلي id=%s type=%s", nid, ntype)
+    return nid
+
+
+def get_notifications_for_user(username):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT n.*, EXISTS(SELECT 1 FROM notification_reads r "
+        "WHERE r.notification_id = n.id AND r.username = ?) AS is_read "
+        "FROM notifications n ORDER BY n.id DESC",
+        (username,),
+    ).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["is_read"] = bool(d.get("is_read"))
+        result.append(d)
+    return result
+
+
+def get_unread_notifications_count(username):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT COUNT(*) FROM notifications n "
+        "WHERE NOT EXISTS (SELECT 1 FROM notification_reads r "
+        "WHERE r.notification_id = n.id AND r.username = ?)",
+        (username,),
+    ).fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+def mark_notification_read(notification_id, username):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT OR REPLACE INTO notification_reads (notification_id, username, read_at) "
+        "VALUES (?, ?, ?)",
+        (notification_id, username, datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    conn.close()
+
+
+def mark_all_notifications_read(username):
+    conn = sqlite3.connect(DB_PATH)
+    now = datetime.now().isoformat(timespec="seconds")
+    for r in conn.execute("SELECT id FROM notifications").fetchall():
+        conn.execute(
+            "INSERT OR REPLACE INTO notification_reads (notification_id, username, read_at) "
+            "VALUES (?, ?, ?)",
+            (r[0], username, now),
+        )
+    conn.commit()
+    conn.close()
+
+
+def add_notification_reply(notification_id, username, reply_text):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        "INSERT INTO notification_replies (notification_id, username, reply_text, replied_at) "
+        "VALUES (?, ?, ?, ?)",
+        (notification_id, username, reply_text,
+         datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    logger.info("رد محلي على إشعار %s من %s", notification_id, username)
+    return rid
+
+
+def get_notification_replies():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT r.id, r.notification_id, r.username, r.reply_text, r.replied_at, "
+        "u.data AS user_data, n.text AS notification_text, n.question AS notification_question "
+        "FROM notification_replies r "
+        "LEFT JOIN users u ON u.username = r.username "
+        "LEFT JOIN notifications n ON n.id = r.notification_id "
+        "ORDER BY r.id DESC",
+    ).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        d = dict(r)
+        user_data = d.pop("user_data", None)
+        try:
+            ud = json.loads(user_data) if user_data else {}
+        except Exception:
+            ud = {}
+        d["shop_name"] = ud.get("shop_name", d["username"])
+        result.append(d)
+    return result
+
+
+def delete_notification_reply(reply_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM notification_replies WHERE id = ?", (reply_id,))
+    conn.commit()
+    conn.close()
+    logger.info("تم حذف رد الإشعار المحلي %s", reply_id)
+
+
+def delete_notification(notification_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM notification_reads WHERE notification_id = ?", (notification_id,))
+    conn.execute("DELETE FROM notification_replies WHERE notification_id = ?", (notification_id,))
+    conn.execute("DELETE FROM notifications WHERE id = ?", (notification_id,))
+    conn.commit()
+    conn.close()
+    logger.info("تم حذف الإشعار المحلي %s نهائياً", notification_id)
+
+
+def api_delete_notification(notification_id):
+    from . import api_client
+    return api_client.delete_notification(notification_id)
+
+
+def api_get_notifications():
+    from . import api_client
+    return api_client.get_notifications()
+
+
+def api_create_notification(ntype, text, link_url="", link_label="", question=""):
+    from . import api_client
+    return api_client.create_notification(ntype, text, link_url, link_label, question)
+
+
+def api_mark_notifications_read(notification_id=None, mark_all=False):
+    from . import api_client
+    return api_client.mark_notification_read(notification_id, mark_all)
+
+
+def api_reply_notification(notification_id, reply_text):
+    from . import api_client
+    return api_client.reply_notification(notification_id, reply_text)
+
+
+def api_get_notification_replies():
+    from . import api_client
+    return api_client.get_notification_replies()
+
+
+def api_delete_notification_reply(reply_id):
+    from . import api_client
+    return api_client.delete_notification_reply(reply_id)
+
+
+def api_get_user_details(username):
+    from . import api_client
+    return api_client.get_user_details(username)

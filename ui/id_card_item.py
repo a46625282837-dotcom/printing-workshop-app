@@ -216,11 +216,11 @@ class IDCardItem(QGraphicsPixmapItem):
                 event.accept()
                 return
             if self._zoom_in_rect.contains(event.pos()):
-                self.set_item_scale(self._scale * 1.25, snap=True)
+                self.set_item_scale(self._scale * 1.05)
                 event.accept()
                 return
             if self._zoom_out_rect.contains(event.pos()):
-                self.set_item_scale(self._scale / 1.25)
+                self.set_item_scale(self._scale / 1.05)
                 event.accept()
                 return
             if self._image_overflows():

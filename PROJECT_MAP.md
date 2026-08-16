@@ -1,7 +1,7 @@
 # ورشة طباعة - ID Card Desktop Application
 
 ## Architecture
-- **Python 3.14.2** / **PySide6 6.11.1** / **Flask 3.x** (backend)
+- **Python 3.11.4** / **PySide6 6.11.1** / **Flask 3.x** (backend)
 - Dual-mode: local SQLite or Flask REST API mode (`IDCARD_API_MODE` env var or `data/app_config.json`)
 - For wide distribution: Client-Server (API mode) — users connect to a central Flask server
 
@@ -46,7 +46,8 @@ idcard_app/
 │   └── pdf_editor.py        # PDF editing with page numbers
 ├── tests.py                 # 59 tests (pytest + pytest-qt)
 └── dist/
-    └── ورشة طباعة.exe       # Standalone executable (~347 MB, --onefile)
+├── dist/
+    └── ورشة طباعة.exe       # Standalone executable (~123 MB, --onefile)
 ```
 
 ## Key Features
@@ -125,11 +126,13 @@ Next login attempt hit `max_devices` limit → "مسجل من لابتوب اخ�
 - Version bumped to 1.1.2
 
 ## Banner Visibility Fix (2026-06-16)
-**Root cause:** In API mode, `_update_banners()` was guarded by `if self._is_admin:` in 3 locations (`__init__`, `_login_submit`, `_refresh_user_data`). Banners are stored server-side in `banner_pixmaps` table and `GET /api/banners` is accessible to any authenticated user, but the admin-only guard prevented non-admin clients from fetching/displaying them.
+**Root cause:** In API mode, `_update_banners()` was guarded by `if self._is_admin:` in 4 locations (`__init__`, `_login_submit`, `_refresh_user_data`, `_try_restore_session`). Banners are stored server-side in `banner_pixmaps` table and `GET /api/banners` is accessible to any authenticated user, but the admin-only guard prevented non-admin clients from fetching/displaying them.
 
-**Fix:** Removed the `if self._is_admin:` guard from all 3 `_update_banners()` call sites. The method already handles both API mode (fetches from server) and local mode (reads from `self._users["ahmed"]`) correctly.
+**v1 Fix:** Removed the `if self._is_admin:` guard from `__init__`, `_login_submit`, `_refresh_user_data` call sites.
 
-**Files changed:** `ui/main_window.py` — 3 lines changed (removed admin guard)
+**v2 Fix (2026-06-16 v2):** Removed remaining `if self._is_admin:` guard from `_try_restore_session()` — this was the last call site preventing banner display for non-admin users who restore a session (app restart).
+
+**Files changed:** `ui/main_window.py` — 4 lines changed (removed admin guard from all call sites)
 
 ## Multi-Device Session Control (Configurable Per User)
 - `user_sessions` table stores active `(username, token_id, created_at)` per device
@@ -175,23 +178,441 @@ Next login attempt hit `max_devices` limit → "مسجل من لابتوب اخ�
   - When not logged in: no-op
   - Handles pending messages (subscription renewal notifications)
 
-## Update Checker (In-App)
-- Server endpoint `GET /api/app/version` returns `{"version": "1.1.0", "download_url": "..."}`
-- `APP_VERSION` constant in `ui/main_window.py` (bump before building new EXE)
-- `_check_for_updates()` method in `MainWindow`:
-  - Called after login / session restore / refresh button
-  - Compares server version with local `APP_VERSION`
-  - If different: QMessageBox asking to download, opens URL in browser
-- `api_client.check_version()` → `core.database.api_check_version()` → server
-- Server also respects `APP_VERSION` env var for overrides
-- No auto-download; user clicks to open the MediaFire link
+### Photo Processing v4 (2026-06-18) — Parts Deletion Fix (grabCut)
+**Problem:** Parts of the person (shoulders, hair edges) were being removed along with the background in the grabCut fallback on user laptops. Root cause: the grabCut mask had two issues:
+1. **`GaussianBlur((5,5), 2)` on the alpha mask** — created semi-transparent pixels at the person's edge. When `composite_white_bg()` pasted this onto white, semi-transparent pixels blended with white, looking like parts "faded out" or were "deleted."
+2. **`MORPH_OPEN` with 7×7 kernel** — removed small white regions in the mask, including fine details like hair strands.
+
+**Fix (5 changes in `core/photo_processor.py`):**
+1. **Removed `GaussianBlur` entirely** — the alpha mask is now binary (0 or 255), no semi-transparency → no white blending at edges.
+2. **Removed `MORPH_OPEN`** — preserves fine details (hair) that might be small white regions.
+3. **Reduced initial BG margin to 1px** (was `margin//2` ≈ 2.5%) — only the outermost pixels are marked as sure background, preventing shoulder/edge areas from being misclassified.
+4. **Increased iterations: 4** (was 3) — better grabCut convergence.
+5. **Smaller kernel: 5×5 ellipse** (was 7×7) — less aggressive morph close, preserves boundary detail.
+
+**Result:** grabCut mask quality on user laptops now matches rembg quality on admin's laptop — no parts of the person are deleted at the edges.
+
+### Photo Processing v5 (2026-06-18) — Photo Display Fix (Thread Safety + Fallback)
+**Problem:** Photos in the photo editor section stopped appearing entirely after drag-and-drop or the "+" button. Three root causes:
+1. **`ensure_rembg_ready()` blocking** — called before the processing loop in `PhotoProcessingThread.run()`. On frozen EXE (user's laptop), `new_session()` downloads the 176MB `u2net.onnx` model. If network is slow/missing, this can hang for minutes → no images ever processed, no `finished_all` emitted.
+2. **QPixmap created in worker thread** — QPixmap is not thread-safe. Creating it in the thread and emitting via signal can produce a null pixmap on some platforms (especially Windows frozen EXE).
+3. **No fallback on failure** — if `remove_background`, `auto_crop_subject`, or `composite_white_bg` threw an exception, the error was logged but no `photo_ready` was emitted → user saw NO images.
+
+**Fix (3 changes in `ui/photo_editor.py`):**
+1. **Removed `ensure_rembg_ready()` entirely from the thread** — `remove_background()` already handles model initialization lazily (tries rembg first, falls back to grabCut). No more blocking call before processing.
+2. **Changed signal from `Signal(object, int)` to `Signal(bytes, int)`** — emit raw PNG bytes from the worker thread. Convert to QPixmap in the main thread's `_on_photo_ready()` callback. Thread-safe.
+3. **Added fallback in `except` block** — if background removal fails, the ORIGINAL image (RGB, white composited) is saved as PNG and emitted. User always sees SOMETHING on the A4 grid.
+
+**Files changed:** `ui/photo_editor.py` — `PhotoProcessingThread.run()`, `photo_ready` signal type, `_on_photo_ready()` (lines ~123-165)
+
+### Photo Processing v6 (2026-06-18) — Show-Original-First Approach
+**Problem:** The v5 fix (bytes + fallback) still didn't work on user's frozen EXE. Images never appeared. Root cause: if the thread crashes silently (unhandled exception in `run()`), NO images are emitted. The fallback in v5 only works if the exception is caught inside the try block — but if the import fails or an exception occurs before the loop, the entire thread dies.
+
+**Fix (2 changes in `ui/photo_editor.py`):**
+1. **`add_images()` now loads and displays ORIGINAL images immediately** in the scene, before starting the processing thread. Users ALWAYS see their photos right away, even if the thread crashes or hangs.
+2. **`_on_photo_ready()` replaces existing `PhotoItem` pixmap in-place** (`self.photos[index].setPixmap(qpix)`) instead of calling `_place_photo`. The original photo is already in the scene; processing just upgrades it.
+
+**Result:** Even if the background-removal thread crashes entirely, the user still sees their original photos (white-composited) on the A4 grid. The thread is purely an optimization to add transparent background removal when it works.
+
+**Files changed:** `ui/photo_editor.py` — `add_images()`, `_on_photo_ready()` (lines ~376-398)
+
+### Photo Processing v7 (2026-06-18) — Switch to u2netp Model (4MB vs 176MB)
+**Problem:** `rembg` default model `u2net` is 176MB. On user's frozen EXE (CPU-only onnxruntime):
+- Download hangs/takes forever (no internet or slow speed)
+- Inference is 30-60s per image on CPU
+- If download fails → grabCut fallback (much lower quality)
+
+**Fix (1 change in `core/photo_processor.py`):**
+- Switch to `u2netp` model (4MB, lightweight version of u2net)
+- Cached session (`_rembg_session` module-level global) reused across calls
+- Quality: nearly identical to u2net for portrait/id-photo use cases
+- Performance on CPU: ~2-5s per image (vs 30-60s for u2net)
+- Download: ~4MB (vs 176MB) — completes in seconds even on slow connections
+
+**Note:** `ensure_rembg_ready()` is now a dead function (no callers after v5/v6). Kept for reference.
+
+**Files changed:** `core/photo_processor.py` — `_remove_bg_ai()` (cached `u2netp` session), `ensure_rembg_ready()` (uses `u2netp`)
+
+
+
+### Photo Processing v10 (2026-06-27) — Thread Index Fix (start_index)
+**Problem:** When adding a second batch of photos (after the first batch is already placed and processed), the processing thread always emits indices 0, 1, 2... from its own local enumeration. `_on_photo_ready()` uses these as absolute indices into `self.photos`, so the second batch's result at index 0 overwrites `self.photos[0]` (the first photo from the first batch) instead of writing to the correct slot at the end.
+
+**Fix (`ui/photo_editor.py`):**
+1. **`PhotoProcessingThread.__init__`** — added `start_index=0` parameter; stores as `self._start_index`.
+2. **`PhotoProcessingThread.run()`** — emits `self._start_index + i` (both success and fallback paths).
+3. **`add_images()`** — captures `old_len = len(self.photos)` before placing originals, passes as `start_index` to the thread.
+4. **`add_images()`** — disconnects old thread signals before starting a new thread, preventing stale callbacks from overwriting newer results.
+
+**Result:** Adding photos in multiple batches places each batch's results in the correct grid cells. First-batch photos are never overwritten by second-batch results.
+
+**Files changed:** `ui/photo_editor.py`
+
+### Photo Processing v9 (2026-06-27) — Direct onnxruntime (No rembg)
+**Problem:** Even with bundled u2netp and CPU-only mode, rembg still didn't produce transparency in the frozen EXE. Root cause: `rembg.bg` imports `pymatting`, `scipy.ndimage`, `skimage.morphology` at module level — these packages are NOT bundled (excluded from spec) → silently fail → alpha=255 (opaque) → no visual change.
+
+**Fix for EXE (`core/photo_processor.py`):**
+1. **`_remove_bg_direct()`** — new function using onnxruntime directly (no rembg/pymatting/scipy/skimage/pooch). Replicates `U2netpSession.predict()` exactly: load image → preprocess → run model → postprocess mask → composite RGBA. Produces identical results to rembg.
+2. **Fallback chain updated** in `remove_background()`: rembg → direct onnxruntime → grabCut → opaque RGBA (critical log).
+3. **Post-condition check** — if alpha extrema == (255, 255), raises ValueError to force fallback.
+
+**Fix for EXE (`ورشة طباعة.spec`):**
+- Removed scipy/skimage/pymatting/pooch/rembg/numba from `hiddenimports`; added them to `excludes`.
+- Kept only `onnxruntime` + `cv2` as hidden imports.
+- Added `runtime_hooks=['runtime_hook.py']`.
+
+**New file (`runtime_hook.py`):**
+- Adds `sys._MEIPASS/onnxruntime/capi/` to `PATH` before any code runs → ensures `onnxruntime.dll` is found.
+
+**Result:** EXE reduced from 206 MB → 117 MB (120 MB savings from dropping scipy/skimage). Background removal now works reliably on user laptops with real RGBA transparency.
+
+**Files changed:** `core/photo_processor.py`, `ui/photo_editor.py`, `runtime_hook.py` (new), `ورشة طباعة.spec`
+
+### Photo Processing v8 (2026-06-18) — Bundle u2netp.onnx in EXE + CPU-only Mode
+**Problem:** Even with u2netp, background removal still didn't work on user's frozen EXE. Two root causes:
+1. **onnxruntime tries to load CUDA DLLs** at import, which fail on laptops without CUDA → rembg crashes silently → falls to grabCut → grabCut also fails (cv2 DLL issues in frozen EXE) → returns original image with alpha=255 (no actual background removal)
+2. **u2netp.onnx not available** if internet is down → rembg can't download → crashes
+
+**Fix (3 changes):**
+1. **`core/photo_processor.py`** — Force CPU-only mode: `os.environ['CUDA_VISIBLE_DEVICES'] = '-1'` before importing rembg. onnxruntime skips CUDA provider entirely, no more DLL loading crash.
+2. **`core/photo_processor.py`** — Bundle model in EXE: added `_ensure_model_file()` which copies `u2netp.onnx` from the EXE bundle (`sys._MEIPASS/models/`) to `~/.u2net/` on first run. rembg loads it locally — no download needed, works offline.
+3. **`ورشة طباعة.spec`** — Added `('models', 'models')` to `datas` so PyInstaller bundles the 4.5MB `models/u2netp.onnx` inside the EXE.
+
+**Result:** rembg with u2netp now works RELIABLY on the frozen EXE:
+- No CUDA DLL dependency (CPU-only onnxruntime)
+- No internet needed (model bundled and cached)
+- ~2-5s per image on CPU
+- Quality identical to admin's laptop
+
+**Files changed:** `core/photo_processor.py` (added `_get_bundled_model_path()`, `_ensure_model_file()`, CPU env var), `ورشة طباعة.spec` (added `models` datas)
+
+## Photo Processing Fix (2026-06-16) — White Background + Robust Fallback
+
+## Photo Processing Fix (2026-06-16) — White Background + Robust Fallback
+**Problem:** Parts of the person (shoulders, hair edges) were being removed along with the background in the grabCut fallback on user laptops. Root cause: the grabCut mask had two issues:
+1. **`GaussianBlur((5,5), 2)` on the alpha mask** — created semi-transparent pixels at the person's edge. When `composite_white_bg()` pasted this onto white, semi-transparent pixels blended with white, looking like parts "faded out" or were "deleted."
+2. **`MORPH_OPEN` with 7×7 kernel** — removed small white regions in the mask, including fine details like hair strands.
+
+**Fix (5 changes in `core/photo_processor.py`):**
+1. **Removed `GaussianBlur` entirely** — the alpha mask is now binary (0 or 255), no semi-transparency → no white blending at edges.
+2. **Removed `MORPH_OPEN`** — preserves fine details (hair) that might be small white regions.
+3. **Reduced initial BG margin to 1px** (was `margin//2` ≈ 2.5%) — only the outermost pixels are marked as sure background, preventing shoulder/edge areas from being misclassified.
+4. **Increased iterations: 4** (was 3) — better grabCut convergence.
+5. **Smaller kernel: 5×5 ellipse** (was 7×7) — less aggressive morph close, preserves boundary detail.
+
+**Result:** grabCut mask quality on user laptops now matches rembg quality on admin's laptop — no parts of the person are deleted at the edges.
+
+## Photo Processing Fix (2026-06-16) — White Background + Robust Fallback
+**Root cause:** `PhotoProcessingThread.run()` saved processed images as RGBA PNG with transparent background instead of white. On the user's laptop (frozen EXE), `rembg`'s ML model is not bundled, causing it to fail; if OpenCV's `grabCut` also fails, `remove_background()` returns the original as RGBA with fully opaque alpha → `auto_crop_subject()` sees `bbox == full image` → no crop happens.
+
+**v1 Fix:** Added `composite_white_bg()` + `auto_crop_subject` skip when bbox ≥98%.
+
+### Photo Processing v2 (2026-06-16 v2) — Radical grabCut Quality Fix
+**Problem:** Even when grabCut works, its mask quality is poor compared to `rembg`: jagged edges, cuts into the subject, poor cropping. Performance is also slower than expected.
+
+**Fix (4 changes):**
+1. **`core/photo_processor.py`** — `_remove_bg_grabcut()` rewritten:
+   - Uses `cv2.GC_INIT_WITH_MASK` with a smart initial mask (center=probable FG, edges=sure BG) instead of the old `GC_INIT_WITH_RECT` (which used a small centered rect)
+   - Increased iterations: 3 (was 2) for better convergence
+   - Added `cv2.MORPH_OPEN` after `MORPH_CLOSE` to clean noise
+   - Added `cv2.GaussianBlur((5,5), 2)` on the mask for smooth alpha edges
+   - Larger structuring element (7×7 ellipse → was 5×5) for better smoothing
+2. **`core/photo_processor.py`** — `auto_crop_subject()`: adaptive margin — if crop area is <30% of total image (alpha mask too tight), margin increases to 50%; if <50%, margin increases to 30%. Prevents cutting into subject when mask is inaccurate.
+3. **`core/photo_processor.py`** — Added `ensure_rembg_ready()`: pre-loads the `rembg` model via `new_session()`. This triggers model download on first run (in frozen EXE) without failing silently.
+4. **`ui/photo_editor.py`** — `PhotoProcessingThread.run()` calls `ensure_rembg_ready()` at start (before processing any images), so the model download happens in the background thread with progress bar visible.
+
+**Files changed:** `core/photo_processor.py` (~40 lines changed), `ui/photo_editor.py` (1 line changed)
+
+### Photo Processing v3 (2026-06-16 v3) — Performance + Progress
+**Root cause:** `rembg` on admin's laptop uses GPU (CUDA via onnxruntime) → fast. On user's laptop (frozen EXE), it runs CPU-only → 30-60s per high-res image. No per-image progress feedback → user doesn't know if app is hung.
+
+**Fix (2 changes):**
+1. **`ui/photo_editor.py`** — `PhotoProcessingThread.MAX_PROCESS_PX = 1200`: downscales images before processing if they exceed 1200px on the longest side. This speeds up both `rembg` and `grabCut` by ~10-50× (processing time scales with pixel count). Final image is still cropped and composited at full quality for the A4 grid.
+2. **`ui/photo_editor.py`** — Progress bar changed from indeterminate (0-0) to determinate with per-image counter (`3/10` style). Shows real-time progress feedback during multi-image processing.
+
+**Files changed:** `ui/photo_editor.py` (~15 lines changed)
 
 ## Build
 ```bash
 cd idcard_app
 pyinstaller "ورشة طباعة.spec" --clean
 ```
-Output: `dist/ورشة طباعة.exe` (~52 MB)
+Output: `dist/ورشة طباعة.exe` (~123 MB)
+
+### Version 1.3.0 (2026-06-28) — Arabic Garbled Text Fix
+**Problem:** The Arabic text in the UI (top bar buttons, context menus, print dialog) was garbled due to byte-level corruption of double-encoded UTF-8 Arabic characters in `a4_editor.py`.
+
+**Fix:**
+- Restored all Arabic UI strings to correct Unicode in `a4_editor.py`: buttons (رجوع, إضافة صورة, طباعة, حفظ PDF, تفريغ الكل, بدون قص), tooltips, context menu items (حذف, تدوير, تكرار, تكبير, تصغير, حجم أصلي), print dialog labels, message boxes, file dialogs
+- Fixed 2 broken f-strings (literal `\n` written as real newlines) caused by the fix script
+- Fixed 1 indentation error (`IndentationError`) from incorrect fix application
+- Bumped `APP_VERSION` to `1.3.0` in both client (`ui/main_window.py`) and server default (`backend/app.py`)
+- All 54 applicable tests pass (4 pre-existing failures: 2 missing `fitz`, 2 missing `flask`)
+
+**Files changed:** `ui/a4_editor.py`
+
+### Version 1.4.0 (2026-06-28) — Photo Popup Crop + Enhance (v1–v3)
+
+**v1 — Initial:** `PhotoCropDialog` with crop overlay, zoom, single slider denoise/sharpen.
+
+**v2 — Face-Aware Multi-Slider Enhancement (later trimmed to 3 sliders):**
+- **`_face_features()`** in `core/photo_processor.py` — Haar cascade face detection + anatomical-ratio elliptical masks for: skin (extended to neck), eyes (L/R), eyebrows (L/R), lips (used only for `skin_nf` exclusion). Returns:
+  - `skin_color`: adaptive color-based mask (BGR distance threshold from reference face skin, constrained to face+neck region, morphologically cleaned)
+  - `skin_nf`: face-only skin mask with features removed (for smoothing/blemish)
+- **`enhance_portrait_advanced(pil, settings)`** — per-region processing with 3 settings (0–100):
+  - `skin_smooth`: bilateral filter on face skin (excl. features) via `skin_nf`
+  - `blemish`: local-std thresholded inpainting on face skin via `skin_nf`
+  - `brightness`: BGR multiplication on face+neck mask via `skin` (max +35%, no blue shift)
+  - Falls back to global bilateral+inpaint if no face detected
+- **`enhance_portrait(strength)`** kept as backward-compat wrapper
+
+**v3 — Dialog Redesign:**
+- **`QSplitter` layout**: left = image preview, right = control panel (280px)
+- **`_SliderGroup`** widget: labeled QSlider (0–100) + auto-updating value label; double-click resets to 0
+- **`_ControlPanel`**: 2×4 grid of 8 sliders in QGroupBox + tooltips
+- **✨ تحسين تلقائي button**: sets all sliders to sensible defaults for ID portraits
+- **📷 قبل/بعد toggle** (toolbar button + `B` shortcut): swaps scene between processed and unprocessed preview
+- **Wait cursor** during processing
+- **Keyboard shortcuts**: `Enter/Return`=Apply, `Esc`=Cancel, `B`=Before/After, `R`=Reset all
+- **`_before_pixmap` / `_after_pixmap`** stored in preview for fast swap via `setPixmap`
+
+**Files changed:** `ui/photo_editor.py`, `core/photo_processor.py`, `PROJECT_MAP.md`
+
+### v1.4.1 (2026-06-28) — Double-Click Fix + Vertical Sliders + Auto-Enhance Tuning
+
+**Bug 1 — Double-click not opening dialog:** `PhotoItem.mousePressEvent` called `super().mousePressEvent()` which starts Qt's item-move state machine (`ItemIsMovable`). On second click, the move state consumed the event before it reached the view's handler.
+
+**Fix:** Moved dialog opening to `PhotoItem.mouseDoubleClickEvent` (Qt delivers double-click events to items regardless of move state). Simplified `PhotoGraphicsView.mouseDoubleClickEvent` to just call `super()`.
+
+**Bug 2 — Sliders too small (horizontal, ~140px each in 2-col grid):** Changed `_SliderGroup` orientation from `Qt.Horizontal` to `Qt.Vertical` — label+value header above, slider track below. Each slider now fills row height, making the track and handle clearly visible.
+
+**Bug 3 — Auto-enhance over-darkens eyes/eyebrows:** Reduced AUTO_PRESET `eyes` (60→35) and `eyebrows` (50→25) to prevent unnatural darkening at default preset.
+
+**Bug 4 — Eye clarity slider makes eyes colorless + eyebrow slider stains forehead (2026-06-29 fix):**
+- **Eyes:** `enhance_portrait_advanced` used CLAHE on grayscale then converted to BGR — this strips iris color, making eyes look faded. Also created dark halos from over-amplified contrast. **Fix:** Replaced with unsharp mask on the **color BGR** image (`cv2.addWeighted` with Gaussian blur), preserving natural eye color and iris detail.
+- **Eyebrows:** Same grayscale-stripping issue on the BGR→gray→darken→gray→BGR pipeline. Plus the aggressive darkening factor (40% at max) combined with `soft_blend`'s fixed sigma=5 feathering caused darkness to bleed ~15px outside the eyebrow ellipse into the forehead. **Fix:** Darkens BGR channels proportionally (preserves color tone) with reduced factor (12% max), and removed unnecessary mask dilation.
+
+**Bug 5 — Brightness slider whitens entire image + adds blue tint (2026-06-29 fix):**
+- **Whole-image instead of face-only:** Used `all_mask` (full-image ones matrix). **Fix:** Changed to `feats['skin']` mask — only face skin is brightened; background, clothes, hair stay untouched.
+- **Blue tint:** HSV V-channel adjustment (`hsv[:,:,2] += t*50`) then HSV→BGR conversion shifts warm skin tones toward cool/blue. **Fix:** Replaced with simple BGR channel multiplication (`result * factor`) — preserves R:G:B ratio exactly, so skin hue stays warm. Max +35% brightness at slider=100.
+
+**Files changed:** `ui/photo_editor.py` (3 edits), `core/photo_processor.py` (eyes, eyebrows, brightness), `tests.py` (`TestSliderGroup` added), `PROJECT_MAP.md`
+**Tests:** 55 total (2 new `TestSliderGroup`, `TestPhotoItem` added this session)
+
+### v1.4.2 (2026-06-29) — Dark Circles Fix + Remove Hair + Eye Clarity Tuning
+
+**Bug 1 — Dark circles slider makes under-eye DARKER (not lighter):** `cv2.GaussianBlur(img, …)` used the **original** darker image at huge sigma (max 75), pulling dark eye pixels into the under-eye mask and making the area look painted black.
+
+**Fix:** Replace blur source from `img` (original) to `cur_u8` (processed result after skin smoothing). Reduce sigma range from `max(15, t*60+15)` → `max(3, 3+t*7)` (max sigma=10). Reduce blend from `t*0.8` → `t*0.35`. The under-eye area now gets a gentle local blur from the already-brightened face — no more dark bleed.
+
+**Bug 2 — Hair enhancement not wanted:** Removed entirely.
+- Removed `"تحسين الشعر"` entry from slider grid, `hair` from `TOOLTIPS`, `hair: 40` from `AUTO_PRESET`.
+- Removed hair processing block from `enhance_portrait_advanced()`.
+- Removed elliptical hair mask from `_face_features()`.
+
+**Bug 3 — Eye clarity looks blocky/pixelated:** Unsharp mask used `sigmaX=1.0` (too small, amplified pixel noise) and `amt=t*1.0` (too strong, created artifacts).
+
+**Fix:** Increased Gaussian blur sigma from 1.0 → 3.0 (targets mid-frequency edges, not pixel noise). Reduced max sharpening amount from 1.0 → 0.5. Eyes now sharpen naturally without blocky artifacts.
+
+**Files changed:** `ui/photo_editor.py` (TOOLTIPS, AUTO_PRESET, entries), `core/photo_processor.py` (dark_circles, eyes, hair removal), `PROJECT_MAP.md`
+**Tests:** 55 total (no new tests; existing pass intact)
+
+### v1.4.3 (2026-06-29) — Remove Update-Check Popup
+
+**Problem:** `_check_for_updates()` called `QMessageBox.question` on every startup (after session restore, login, or refresh), comparing a local `APP_VERSION` string with the server's. The dialog was annoying — user wanted it gone entirely.
+
+**Fix:** Removed the entire feature:
+- Deleted `_check_for_updates()` method from `MainWindow` (7 lines + dialog logic)
+- Removed 3 call sites: `_try_restore_session()`, `_refresh_user_data()`, `_login_submit()`
+- Removed `APP_VERSION` constant from `ui/main_window.py`
+- Removed orphaned wrappers: `api_check_version()` in `core/database.py`, `check_version()` in `core/api_client.py`
+- Removed 3 orphaned tests: `test_api_client_has_check_version`, `test_main_window_has_check_for_updates`, `test_app_version_constant_is_string`
+- The server endpoint `GET /api/app/version` still exists but is never called from the client.
+
+**Files changed:** `ui/main_window.py` (5 edits), `core/database.py` (remove 1 function), `core/api_client.py` (remove 1 function), `tests.py` (remove 3 tests), `PROJECT_MAP.md`
+**Tests:** 52 total (removed 3 update-check tests)
+
+### v1.4.4 (2026-06-29) — Keep Only 3 Sliders + Fix Neck Not Brightened
+
+**Problem 1 — Too many sliders:** User wanted only `skin_smooth`, `blemish`, and `brightness`. All others (dark_circles, eyes, eyebrows, lips) removed.
+
+**Fix:** 
+- Removed 4 entries from `entries`, `TOOLTIPS`, `AUTO_PRESET` in `_ControlPanel`
+- Removed 4 processing blocks (`dark_circles`, `eyes`, `eyebrows`, `lips`) from `enhance_portrait_advanced()`
+- Removed unused masks (`nose`, `under_eye`) and unused return keys (`left_eye`, `right_eye`, `left_eb`, `right_eb`, `lips`, `nose`, `under_eye`) from `_face_features()`
+- Feature masks (`left_eye`, `right_eye`, `left_eb`, `right_eb`, `lips`) kept as local variables for `skin_nf` computation
+
+**Problem 2 — Brightness misses neck/throat:** `feats['skin']` was only a face oval (y + 18% to y + 66% of face rect). Neck below the chin was untouched, creating a visible brightness boundary.
+
+**Fix:** `_face_features()` now creates two masks:
+- `skin_face` = original face oval only
+- `skin` = `skin_face` + rectangle below (65%–115% of face height, 30% half-width) covering the neck
+- `skin_nf` = `skin_face` minus eyes/eyebrows/lips (used for smoothing/blemish only)
+- Brightness uses `skin` (face + neck); smoothing/blemish use `skin_nf` (face only)
+
+**Files changed:** `ui/photo_editor.py` (TOOLTIPS, AUTO_PRESET, entries), `core/photo_processor.py` (_face_features masks, remove 4 processing blocks), `PROJECT_MAP.md`
+**Tests:** 51 total (no new tests; existing pass intact)
+
+### v1.4.5 (2026-06-29) — Color-Aware Brightness Mask (Adaptive Skin Detection)
+
+**Problem:** The geometric face+neck rectangle (fixed ellipse + rectangle) didn't perfectly match the actual skin area. Parts of the face edges, neck sides, or skin-colored regions near the face were missed by the fixed mask, creating uneven brightening.
+
+**Fix v1:** Replaced the geometric `skin` mask with an **adaptive BGR color-based mask** — but BGR absolute distance is luminance-sensitive, so shadows/highlights on the face/neck were excluded, making the mask miss skin areas.
+
+**Fix v2 (current):** Changed to **YCrCb chrominance distance** — Cr and Cb represent color independently of luminance Y:
+1. Convert reference face skin (from `skin_nf`) to YCrCb, compute average Cr, Cb
+2. Per-pixel Euclidean distance in Cr-Cb plane (ignores Y — shadows/bright spots match)
+3. Adaptive threshold: `max(8, min(25, std_crcb × 2.5))`
+4. Constrain to geometric face+neck region (safety guard)
+5. Morphological close + open cleanup
+
+**Bug:** Used `img` instead of `bgr_img` in the YCrCb block (NameError). The `_preview()` try/finally only restores the cursor, so the exception was silent — dialog stayed on original image. Fixed: `img` → `bgr_img`.
+
+### v1.4.6 (2026-06-29) — Blemish Safety Margin (Protect Eyebrows & Hair Edges)
+
+**Problem:** The std-based blemish detector flagged high-contrast edges (eyebrows, hair-skin boundaries) as "blemishes". While `skin_nf` excluded feature interiors, the dilation (1×3×3) expanded the mask, and `soft_blend`'s sigma=5 feathering (~15px bleed) reached into eyebrow and hair areas, lightening eyebrows and blurring hair edges.
+
+**Fix:** Erode `skin_nf` by 2 iterations of 3×3 (~4–6 pixel margin) before constraining the blemish mask:
+```python
+safe_skin = cv2.erode(feats['skin_nf'], np.ones((3,3), np.uint8), iterations=2)
+m = m & safe_skin
+```
+This keeps blemish processing safely away from eye, eyebrow, lip, and face-edge boundaries. Small pimple/spot masks still pass through; large edge gradients near features are excluded.
+
+Also added `cv2.countNonZero(m)` to logging for diagnostics.
+
+**Files changed:** `core/photo_processor.py` (blemish block safety margin), `PROJECT_MAP.md`
+**Tests:** 51 total (no new tests; existing pass intact)
+
+### v1.4.7 (2026-06-29) — Live Preview + Broader Neck Brightness Coverage
+
+**Change 1 — Live Preview (No More "معاينة" Button Press):**
+Sliders now trigger an immediate preview update via a debounced QTimer (300ms). When any slider value changes, a single-shot timer is (re)started; after 300ms of no slider activity, `_preview()` runs automatically.
+
+Implementation:
+- Added `anyValueChanged = Signal()` to `_ControlPanel`, connected to each `_SliderGroup.valueChanged`
+- `PhotoCropDialog` connects `_panel.anyValueChanged` → `_preview_timer.start(300)`
+- `_preview_timer` (single-shot, 300ms) fires `_preview()` on timeout
+
+The old "معاينة" button is kept for manual re-trigger if needed.
+
+**Change 2 — Neck Brightness Now Covers Wider Area:**
+Two parameter changes in `_face_features()`:
+1. **Neck rectangle widened** from 30%→35% half-width, extended from 65%–115%→60%–120% of face height — captures wider/thicker necks and overlaps more smoothly with the face oval
+2. **YCrCb threshold max increased** from 25→30 — `thresh = max(8, min(30, std_crcb * 2.5))` — more tolerant of Cr/Cb variation between face and neck skin (neck often has slightly different chrominance due to shadow/blood flow)
+
+**Files changed:** `ui/photo_editor.py` (`QTimer` import, `_ControlPanel.anyValueChanged` signal + connections, `_preview_timer` in dialog), `core/photo_processor.py` (neck rect + YCrCb threshold), `PROJECT_MAP.md`
+**Tests:** 51 total (no new tests; existing pass intact)
+
+### v1.4.8 (2026-06-29) — Auto Enhance Button (Safe Global Pipeline + Skin Refinement)
+
+**What changed:** The "✨ تحسين تلقائي" button runs a 3-stage pipeline: (1) safe global gamma + contrast + sharp, then (2) professional skin smoothing + blemish removal via the existing `enhance_portrait_advanced` with `skin_nf` mask + `soft_blend` (proven code from the manual slider controls). Sliders reset to 0 after for optional fine-tuning.
+
+**`enhance_auto_remini(pil_image)` in `core/photo_processor.py` — v3:**
+
+| # | Stage | Mechanism | Why safe |
+|---|---|---|---|
+| 1. Gamma + Contrast | Haar face-rect mean L → global gamma LUT; LAB L percentile stretch | No masking, global LUT — zero edge artifacts |
+| 2. Mild Sharpening | Global unsharp (sigma=0.6, amount=0.12) | Global operation, gentle params |
+| 3. Skin Refinement | Delegates to `enhance_portrait_advanced({'skin_smooth':60, 'blemish':70})` | Uses the same `skin_nf` mask + `soft_blend` already proven in manual slider mode; no denoising/CLAHE/bilateral |
+
+The critical design insight: **Stage 3 reuses the existing `enhance_portrait_advanced` function** rather than inlining its logic. This is DRY and guarantees that:
+- The `soft_blend` with `skin_nf` (morphologically closed + Gaussian-feathered mask) avoids edge halos
+- The bilateral filter parameters are identical to what slider skin_smooth=60 produces (d≈11, sc≈94, blend≈0.36)
+- The blemish inpainting is what slider blemish=70 produces (th≈16, radius≈4.8, blend≈0.49)
+- No-face fallback still applies gentle global bilateral filter
+
+**Pipeline order matters:** Gamma + sharpening happen FIRST (globally, no mask), then skin refinement is applied ONCE with a single mask. This prevents the compounding-blend-artifact problem of the original v1 (which chained 5 masked stages on top of each other).
+
+**Edge-case hardening (unchanged from v2):**
+- Black/white image → contrast stretch skipped → sharpening on uniform = no-op
+- No face detected → skips gamma, applies stretch + sharp + skin refinement (global fallback)
+- Very dark face (mean<20) → gamma skipped to avoid noise amplification
+- Small images → all ops degrade gracefully
+
+**Files changed:** `core/photo_processor.py` (`enhance_auto_remini` v3 — added `enhance_portrait_advanced` call as Stage 3, updated docstring), `PROJECT_MAP.md`
+**Tests:** 57 total (6 new, 51 old — no regression)
+
+### v1.4.9 (2026-06-29) — Fix: Apply carries enhancement to A4 + remove preview button
+
+**Bug fix — `_apply()` not carrying auto-enhanced result to A4 page:**
+`_apply()` unconditionally called `_preview()`, which always starts from `self._original` with slider settings. After auto-enhance, all sliders are 0, so `_preview()` returned the **original un-enhanced image** — overwriting the auto-enhanced `self._current`. Fix: skip `_preview()` when all sliders are 0 (`ui/photo_editor.py:445`).
+
+**Removed "📷 قبل/بعد" preview toggle button** (requested by user):
+- Removed `_btn_before_after` (button creation, stylesheet, layout addition)
+- Removed `_toggle_before_after()` method and B-keyboard shortcut
+- Removed orphaned `_before_pixmap` (no longer read anywhere)
+- Removed orphaned `_showing_before` attribute + all `setChecked` calls
+- Cleaned up `_after_pixmap` usage left intact (still used for scene display)
+
+**Files changed:** `ui/photo_editor.py` (`_apply` fix, removed `_btn_before_after`/`_toggle_before_after`/`_before_pixmap`/`_showing_before`/B-shortcut), `PROJECT_MAP.md`
+**Tests:** 57 total — no regression (all existing pass)
+
+### v1.5.0 (2026-06-29) — Static image workflow + crop persistence on re-edit
+
+**Behavioral change — no live preview:**
+The image in the crop dialog stays **static** (original) when the user adjusts sliders or drags the crop overlay. Only the crop overlay moves — the underlying image does not re-render. Preview only happens when "تطبيق" is clicked.
+
+- Removed `_preview_timer` entirely (timer + all `.start(300)` calls + `QTimer` import)
+- Removed `anyValueChanged` → timer connection (slider changes no longer trigger preview)
+- Removed `_CropView.mouseReleaseEvent` timer start (crop changes no longer trigger preview)
+- `_apply()` always calls `_preview()` to produce the final result from `self._original` + current settings + current crop rect
+
+**`_original_pixmap` bug fix (v1.5.1):**
+`PhotoItem._original_pixmap` was set at creation time (`add_images` → `_place_photo`) from the **raw** original image. The background-removal thread later replaced the displayed pixmap via `setPixmap()`, but `_original_pixmap` stayed raw. This caused two problems:
+1. Double-click showed the raw image (with original background), not the bg-removed version
+2. Auto-enhance operated on the raw image → worse quality
+
+Fix: `_on_photo_ready` now sets `item._original_pixmap = qpix` so the bg-removed result becomes the "original" for re-editing.
+
+**Files changed:** `ui/photo_editor.py` (`_on_photo_ready`: added `item._original_pixmap = qpix`), `PROJECT_MAP.md`
+**Tests:** 57 total — no regression
+
+**Auto-enhance updates `self._original`:**
+`_trigger_auto_enhance()` now sets `self._original = QPixmap(self._current)` after processing. This ensures that subsequent `_preview()` calls (from `_apply()`) use the auto-enhanced version as the base, rather than the raw original. Slider adjustments after auto-enhance apply on top of the auto-enhanced image.
+
+**Crop rect persistence across edit sessions:**
+- `PhotoItem` now stores `_original_pixmap` (set at creation, updated by bg-removal thread via `_on_photo_ready`) and `_crop_rect` (set on each apply)
+- `PhotoCropDialog` accepts optional `crop_rect` tuple `(x, y, w, h)` parameter
+- On dialog init, if `crop_rect` is provided, `_CropOverlay.set_rect(QRectF(*crop_rect))` is called after overlay creation
+- On `_apply()`, the final crop rect is stored back to `self.crop_rect` for the caller to retrieve
+- On double-click → original image is shown with the previous crop overlay position (not the already-cropped result)
+
+**This means:**
+1. First edit: open original, drag crop, click Apply → cropped result on A4
+2. Double-click same photo → original image reappears with the exact same crop overlay
+3. User can adjust the crop (make it larger/smaller), re-apply
+4. No live preview — image stays untouched until Apply
+
+**Files changed:** `ui/photo_editor.py` (PhotoItem: `_original_pixmap`, `_crop_rect`; PhotoCropDialog: `crop_rect` param, removed timer/auto-preview, `_original` update after auto-enhance, `_apply` returns crop rect; removed `QTimer` import), `PROJECT_MAP.md`
+**Tests:** 57 total — no regression
+
+---
+
+### v1.6.0 — Save PDF in photo editor
+
+**Feature:** Added "حفظ PDF" button next to "طباعة" in the photo editor toolbar. Opens a file-save dialog and renders the multi-page scene to a PDF file with the same layout as printing (A4 pages, auto-scaled).
+
+**Implementation:**
+- Added `QPrinter` import (`PySide6.QtPrintSupport`) and `QPageSize` to existing QtGui import
+- New `_save_pdf()` method (`photo_editor.py:1040`): hides background rects (zValue < 0), creates `QPrinter` with `PdfFormat`, iterates pages rendering each via `scene.render()`, then restores visibility
+- Button `"حفظ PDF"` placed between `"طباعة"` and `"تفريغ الكل"` in the button bar
+
+**Behavior:**
+1. Click "حفظ PDF" → file dialog → choose location → PDF is created
+2. Same subscription check as printing
+3. Multi-page scenes are supported (each page becomes a PDF page)
+4. Background grid lines are excluded from the PDF (only photos appear)
+
+**Files changed:** `ui/photo_editor.py` (imports, button, `_save_pdf`), `PROJECT_MAP.md`
+**Tests:** 65 passed — no regression
+
+---
+
+### v1.6.1 (2026-06-30) — Build after all fixes
+- Built `dist/ورشة طباعة.exe` (~123 MB) with `pyinstaller "ورشة طباعة.spec" --clean`
+- All 65 tests pass, no regression
+- Ready for upload and distribution
 
 ## Deploy (Client-Server) — for wide distribution
 1. Deploy the Flask backend on a cloud server (see `backend/requirements.txt`)

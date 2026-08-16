@@ -13,7 +13,7 @@ logging.disable(logging.CRITICAL)
 from core.image_utils import card_px_size, resize_to_card, CARD_WIDTH_MM, CARD_HEIGHT_MM, TARGET_DPI
 from core.id_extractor import extract_card, four_point_transform, order_points
 from core.printer import print_scene, set_printer_name, get_selected_printer_name
-from core.photo_processor import remove_background, resize_to_photo_size, photo_px_size, auto_crop_subject
+from core.photo_processor import remove_background, resize_to_photo_size, photo_px_size, auto_crop_subject, enhance_auto_remini
 
 
 
@@ -315,6 +315,41 @@ class TestPhotoProcessor(unittest.TestCase):
         per_page = cols * max(1, (297 - 2 * MARGIN + GAP) // (ph + GAP))
         self.assertEqual(grid_pos(0, per_page), (10, 10))
 
+    def test_enhance_auto_remini_rgb_same_size(self):
+        img = Image.new("RGB", (200, 300), color=(120, 130, 140))
+        result = enhance_auto_remini(img)
+        self.assertEqual(result.size, (200, 300))
+        self.assertEqual(result.mode, "RGB")
+
+    def test_enhance_auto_remini_rgba_alpha_preserved(self):
+        img = Image.new("RGBA", (200, 300), (120, 130, 140, 200))
+        result = enhance_auto_remini(img)
+        self.assertEqual(result.mode, "RGBA")
+        self.assertEqual(result.size, (200, 300))
+        np.testing.assert_array_equal(
+            np.array(result.getchannel("A")),
+            np.full((300, 200), 200, dtype=np.uint8))
+
+    def test_enhance_auto_remini_black_does_not_crash(self):
+        img = Image.new("RGB", (100, 100), color=(0, 0, 0))
+        result = enhance_auto_remini(img)
+        self.assertEqual(result.size, (100, 100))
+
+    def test_enhance_auto_remini_white_does_not_crash(self):
+        img = Image.new("RGB", (100, 100), color=(255, 255, 255))
+        result = enhance_auto_remini(img)
+        self.assertEqual(result.size, (100, 100))
+
+    def test_enhance_auto_remini_small_image_does_not_crash(self):
+        img = Image.new("RGB", (10, 10), color=(100, 120, 140))
+        result = enhance_auto_remini(img)
+        self.assertEqual(result.size, (10, 10))
+
+    def test_enhance_auto_remini_actually_modifies_pixels(self):
+        img = Image.new("RGB", (100, 100), color=(80, 90, 100))
+        result = enhance_auto_remini(img)
+        self.assertFalse(np.array_equal(np.array(img), np.array(result)))
+
 
 class TestPdfEditor(unittest.TestCase):
     def test_imports(self):
@@ -506,23 +541,40 @@ class TestAppVersion(unittest.TestCase):
             self.assertIsInstance(data["version"], str)
             self.assertIsInstance(data["download_url"], str)
 
-    def test_api_client_has_check_version(self):
-        """api_client.check_version exists and is callable."""
-        from core import api_client
-        self.assertTrue(hasattr(api_client, "check_version"))
-        self.assertTrue(callable(api_client.check_version))
 
-    def test_main_window_has_check_for_updates(self):
-        """MainWindow has _check_for_updates method."""
-        from ui.main_window import MainWindow
-        self.assertTrue(hasattr(MainWindow, "_check_for_updates"))
-        self.assertTrue(callable(MainWindow._check_for_updates))
 
-    def test_app_version_constant_is_string(self):
-        """APP_VERSION in main_window is a non-empty string."""
-        from ui.main_window import APP_VERSION
-        self.assertIsInstance(APP_VERSION, str)
-        self.assertTrue(len(APP_VERSION) > 0)
+class TestPhotoItem(unittest.TestCase):
+    """PhotoItem double-click should open PhotoCropDialog."""
+
+    def test_photo_item_has_mouse_double_click(self):
+        """PhotoItem must have mouseDoubleClickEvent to handle double-click directly
+        (because PhotoItem.mousePressEvent calls super() which starts a move state
+        machine, preventing the view's mouseDoubleClickEvent from being called)."""
+        from ui.photo_editor import PhotoItem, PhotoGraphicsView
+        self.assertTrue(hasattr(PhotoItem, "mouseDoubleClickEvent"),
+                        "PhotoItem needs its own mouseDoubleClickEvent")
+        self.assertTrue(callable(PhotoItem.mouseDoubleClickEvent))
+
+    def test_photo_graphics_view_double_click_forwards_to_super(self):
+        """PhotoGraphicsView.mouseDoubleClickEvent must NOT contain dialog logic
+        (only calls super) to avoid double-opening when PhotoItem handles it."""
+        from ui.photo_editor import PhotoGraphicsView
+        import inspect
+        src = inspect.getsource(PhotoGraphicsView.mouseDoubleClickEvent)
+        self.assertNotIn("PhotoCropDialog", src,
+                         "PhotoGraphicsView must not open dialog — PhotoItem handles it")
+
+
+class TestSliderGroup(unittest.TestCase):
+    """Sliders in the photo editor panel should be vertical for visibility."""
+
+    def test_slider_orientation_is_vertical(self):
+        """_SliderGroup.__init__ must use Qt.Vertical for its slider."""
+        from ui.photo_editor import _SliderGroup
+        import inspect
+        src = inspect.getsource(_SliderGroup.__init__)
+        self.assertIn("Qt.Vertical", src,
+                      "Slider must be vertical — Qt.Vertical not found in __init__")
 
 
 if __name__ == "__main__":
