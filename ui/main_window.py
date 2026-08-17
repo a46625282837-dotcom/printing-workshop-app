@@ -2029,6 +2029,57 @@ class MainWindow(QMainWindow):
             item = self._replies_table.item(row, col)
             if item:
                 self._show_user_details_dialog(item.text())
+        elif col == 3:
+            item = self._replies_table.item(row, col)
+            if item and item.text():
+                reply_text = item.text()
+                shop = self._replies_table.item(row, 1).text() if self._replies_table.item(row, 1) else ""
+                notif_text = self._replies_table.item(row, 2).text() if self._replies_table.item(row, 2) else ""
+                dialog = QDialog(self)
+                dialog.setWindowTitle("تفاصيل الرد")
+                dialog.setMinimumWidth(420)
+                dialog_layout = QVBoxLayout(dialog)
+                dialog_layout.setSpacing(12)
+                title = QLabel("💬 رد المستخدم")
+                title.setAlignment(Qt.AlignCenter)
+                title.setStyleSheet("font-size: 18px; font-weight: bold; color: #27ae60;")
+                dialog_layout.addWidget(title)
+                if shop:
+                    shop_lbl = QLabel(f"المكتبة: {shop}")
+                    shop_lbl.setStyleSheet("font-size: 13px; color: #666;")
+                    shop_lbl.setAlignment(Qt.AlignCenter)
+                    dialog_layout.addWidget(shop_lbl)
+                notif_frame = QFrame()
+                notif_frame.setStyleSheet("QFrame { background: #f8f9fa; border: 1px solid #ddd; border-radius: 8px; padding: 8px; }")
+                nf_layout = QVBoxLayout(notif_frame)
+                nf_layout.setContentsMargins(8, 8, 8, 8)
+                nf_layout.addWidget(QLabel("الإشعار:"))
+                notif_lbl = QLabel(notif_text)
+                notif_lbl.setWordWrap(True)
+                notif_lbl.setStyleSheet("font-size: 13px; color: #555;")
+                nf_layout.addWidget(notif_lbl)
+                dialog_layout.addWidget(notif_frame)
+                reply_frame = QFrame()
+                reply_frame.setStyleSheet("QFrame { background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 8px; padding: 8px; }")
+                rf_layout = QVBoxLayout(reply_frame)
+                rf_layout.setContentsMargins(8, 8, 8, 8)
+                rf_layout.addWidget(QLabel("الرد:"))
+                reply_lbl = QLabel(reply_text)
+                reply_lbl.setWordWrap(True)
+                reply_lbl.setStyleSheet("font-size: 14px; font-weight: bold; color: #2e7d32;")
+                rf_layout.addWidget(reply_lbl)
+                dialog_layout.addWidget(reply_frame)
+                close_btn = QPushButton("إغلاق")
+                close_btn.setStyleSheet("""
+                    QPushButton {
+                        background: #95a5a6; color: white; font-size: 13px;
+                        padding: 6px 25px; border-radius: 8px; border: none;
+                    }
+                    QPushButton:hover { background: #7f8c8d; }
+                """)
+                close_btn.clicked.connect(dialog.accept)
+                dialog_layout.addWidget(close_btn, 0, Qt.AlignCenter)
+                dialog.exec()
 
     def _delete_notification_reply(self, rid):
         confirm = QMessageBox.question(self, "حذف الرد",
