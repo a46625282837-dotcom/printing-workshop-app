@@ -248,6 +248,7 @@ class MainWindow(QMainWindow):
         self._notif_queue = []
         self._notif_list = []
         self._notif_unread = 0
+        self._notif_processing = False
         self._notif_timer = QTimer(self)
         self._notif_timer.setInterval(60000)
         self._notif_timer.timeout.connect(self._on_notif_timer)
@@ -725,6 +726,22 @@ class MainWindow(QMainWindow):
         from core.database import api_check_auth
         qdata, qerr = api_check_auth()
         if qerr:
+            is_network = any(k in (qerr or "") for k in [
+                "لا يمكن الاتصال", "ConnectionError", "Timeout",
+                "timed out", "RemoteDisconnected",
+            ])
+            if is_network:
+                self._logged_in = True
+                self._username = username
+                self._display_name = sess.get("display_name", username)
+                self._is_admin = sess.get("is_admin", False)
+                self._subscription_required = True
+                self._api_data = {}
+                self._update_auth_ui()
+                self._switch_to_main()
+                logger.info("استعادة جلسة سابقة (بدون تحقق من السيرفر): %s", username)
+                QTimer.singleShot(3000, self._load_notifications)
+                return True
             self._clear_session()
             return False
         self._logged_in = True
@@ -744,7 +761,7 @@ class MainWindow(QMainWindow):
                     f"تم زيادة عدد أيام اشتراكك وأصبحت {rem} يوم")
                 from core.database import api_clear_pending
                 api_clear_pending()
-        self._load_notifications()
+        QTimer.singleShot(500, self._load_notifications)
         logger.info("استعادة جلسة سابقة: %s", username)
         return True
 
@@ -836,7 +853,7 @@ class MainWindow(QMainWindow):
                         f"تم زيادة عدد أيام اشتراكك وأصبحت {rem} يوم")
                     api_clear_pending()
             self._save_session()
-            self._load_notifications()
+            QTimer.singleShot(500, self._load_notifications)
             logger.info("تسجيل دخول API: %s", username)
             return
         if username not in self._users:
@@ -1469,7 +1486,12 @@ class MainWindow(QMainWindow):
                if not n.get("is_read") and n.get("id") not in self._shown_notif_ids]
         if new:
             self._notif_queue.extend(new)
-            self._process_notif_queue()
+            if not getattr(self, "_notif_processing", False):
+                self._notif_processing = True
+                try:
+                    self._process_notif_queue()
+                finally:
+                    self._notif_processing = False
 
     def _process_notif_queue(self):
         while self._notif_queue:
@@ -1588,8 +1610,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(close_btn, 0, Qt.AlignCenter)
 
         logger.info("عرض اشعار منبثق id=%s type=%s", nid, ntype)
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        dialog.raise_()
+        dialog.activateWindow()
         dialog.exec()
-        self._process_notif_queue()
 
     def _submit_notification_reply(self, nid, dialog, reply_edit):
         text = reply_edit.text().strip()
@@ -1787,12 +1811,16 @@ class MainWindow(QMainWindow):
 
     def _open_notifications_page(self):
         self._prev_page_index = self._stack.currentIndex()
-        self._refresh_notifications_list()
         self._stack.setCurrentWidget(self._notifications_widget)
         self.setWindowTitle("ورشة طباعة - الاشعارات")
+        self._refresh_notifications_page_data()
+        logger.info("فتح صفحة الاشعارات")
+
+    def _refresh_notifications_page_data(self):
+        self._load_notifications()
+        self._refresh_notifications_list()
         if not self._is_admin:
             self._mark_all_read()
-        logger.info("فتح صفحة الاشعارات")
 
     def _notifications_back(self):
         self._stack.setCurrentIndex(self._prev_page_index)
