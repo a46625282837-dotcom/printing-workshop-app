@@ -69,7 +69,7 @@ init_db()
 
 _DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://www.mediafire.com/file/7xehgih09e5t3ek/%D9%88%D8%B1%D8%B4%D8%A9+%D8%B7%D8%A8%D8%A7%D8%B9%D8%A9.exe/file")
 
-_APP_VERSION = os.environ.get("APP_VERSION", "1.3.2")
+_APP_VERSION = os.environ.get("APP_VERSION", "1.3.3")
 
 
 @app.route("/api/app/version", methods=["GET"])
