@@ -487,7 +487,7 @@ class MainWindow(QMainWindow):
         box_layout = QVBoxLayout(box)
         box_layout.setContentsMargins(20, 16, 20, 16)
         box_layout.setSpacing(10)
-        header_label = QLabel("للتواصل معنا للاستفسار والاشتراك")
+        header_label = QLabel("للتواصل معنا للاستفسار")
         header_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #fff; background: transparent;")
         header_label.setAlignment(Qt.AlignRight)
         box_layout.addWidget(header_label)
