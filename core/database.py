@@ -554,3 +554,13 @@ def api_delete_notification_reply(reply_id):
 def api_get_user_details(username):
     from . import api_client
     return api_client.get_user_details(username)
+
+
+def api_get_admin_user_stats():
+    from . import api_client
+    return api_client.get_admin_user_stats()
+
+
+def api_get_admin_all_users():
+    from . import api_client
+    return api_client.get_admin_all_users()

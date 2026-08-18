@@ -243,6 +243,8 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._notifications_widget)
         self._replies_widget = self._build_notification_replies_page()
         self._stack.addWidget(self._replies_widget)
+        self._user_stats_widget = self._build_user_stats_page()
+        self._stack.addWidget(self._user_stats_widget)
 
         self._shown_notif_ids = set()
         self._notif_queue = []
@@ -1400,6 +1402,18 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(admin_notif_row)
 
+        btn_user_stats = QPushButton("👥 إحصائيات المستخدمين")
+        btn_user_stats.setStyleSheet("""
+            QPushButton {
+                background: #1a73e8; color: white; font-size: 14px;
+                padding: 8px 25px; border-radius: 6px; border: none;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #1557b0; }
+        """)
+        btn_user_stats.clicked.connect(self._open_user_stats_page)
+        layout.addWidget(btn_user_stats, 0, Qt.AlignCenter)
+
         widget.setObjectName("dashboardPage")
         widget.setStyleSheet("#dashboardPage { background: #cceeff; }")
         return widget
@@ -2110,6 +2124,266 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(self._prev_page_index)
         self.setWindowTitle("ورشة طباعة - لوحة تحكم المالك")
         logger.info("رجوع من صفحة ردود الاشعارات")
+
+    def _build_user_stats_page(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        top = QHBoxLayout()
+        back_btn = QPushButton("← رجوع")
+        back_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent; color: #e67e22; font-size: 14px;
+                border: none; font-weight: bold; padding: 5px;
+            }
+            QPushButton:hover { color: #d35400; }
+        """)
+        back_btn.clicked.connect(self._user_stats_back)
+        top.addWidget(back_btn)
+        top.addStretch()
+        layout.addLayout(top)
+
+        header = QLabel("إحصائيات المستخدمين")
+        header.setAlignment(Qt.AlignCenter)
+        header.setStyleSheet("font-size: 22px; font-weight: bold; color: #e67e22; margin-bottom: 10px;")
+        layout.addWidget(header)
+
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(15)
+
+        self._stat_total = self._make_stat_card("إجمالي المستخدمين", "0", "#1a73e8")
+        stats_row.addWidget(self._stat_total)
+        self._stat_today = self._make_stat_card("مستخدمين اليوم", "0", "#27ae60")
+        stats_row.addWidget(self._stat_today)
+        self._stat_inactive = self._make_stat_card("غير نشطين (+30 يوم)", "0", "#e74c3c")
+        stats_row.addWidget(self._stat_inactive)
+        self._stat_never = self._make_stat_card("لم يسجلوا دخول", "0", "#95a5a6")
+        stats_row.addWidget(self._stat_never)
+
+        layout.addLayout(stats_row)
+
+        self._user_stats_table = QTableWidget()
+        self._user_stats_table.setColumnCount(6)
+        self._user_stats_table.setHorizontalHeaderLabels([
+            "اسم المكتبة", "اسم المستخدم", "رقم الهاتف",
+            "آخر دخول", "الاشتراك", "الحالة"
+        ])
+        self._user_stats_table.horizontalHeader().setStretchLastSection(True)
+        self._user_stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._user_stats_table.setAlternatingRowColors(True)
+        self._user_stats_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._user_stats_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._user_stats_table.setStyleSheet("""
+            QTableWidget {
+                font-size: 13px; border: 1px solid #ddd; border-radius: 8px;
+                alternate-background-color: #f9f9f9;
+            }
+            QHeaderView::section {
+                background: #e67e22; color: white; font-weight: bold;
+                padding: 6px; border: none;
+            }
+        """)
+        self._user_stats_table.cellClicked.connect(self._on_user_stats_cell_clicked)
+        layout.addWidget(self._user_stats_table)
+
+        refresh_btn = QPushButton("🔄 تحديث")
+        refresh_btn.setStyleSheet("""
+            QPushButton {
+                background: #e67e22; color: white; font-size: 14px;
+                padding: 8px 25px; border-radius: 6px; border: none;
+                font-weight: bold;
+            }
+            QPushButton:hover { background: #d35400; }
+        """)
+        refresh_btn.clicked.connect(self._refresh_user_stats)
+        layout.addWidget(refresh_btn, 0, Qt.AlignCenter)
+
+        widget.setObjectName("userStatsPage")
+        widget.setStyleSheet("#userStatsPage { background: #cceeff; }")
+        return widget
+
+    def _make_stat_card(self, title, value, color):
+        frame = QFrame()
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background: white; border-radius: 12px;
+                border: 2px solid {color}; padding: 15px;
+            }}
+        """)
+        frame.setMinimumHeight(80)
+        v = QVBoxLayout(frame)
+        v.setAlignment(Qt.AlignCenter)
+        lbl_title = QLabel(title)
+        lbl_title.setAlignment(Qt.AlignCenter)
+        lbl_title.setStyleSheet(f"font-size: 12px; color: {color}; font-weight: bold; border: none; background: transparent;")
+        v.addWidget(lbl_title)
+        lbl_value = QLabel(value)
+        lbl_value.setAlignment(Qt.AlignCenter)
+        lbl_value.setStyleSheet(f"font-size: 28px; font-weight: bold; color: {color}; border: none; background: transparent;")
+        lbl_value.setObjectName("statValue")
+        v.addWidget(lbl_value)
+        frame.setProperty("statValueLabel", lbl_value)
+        return frame
+
+    def _update_stat_card(self, card, value):
+        lbl = card.property("statValueLabel")
+        if lbl:
+            lbl.setText(str(value))
+
+    def _open_user_stats_page(self):
+        self._prev_page_index = self._stack.currentIndex()
+        self._stack.setCurrentWidget(self._user_stats_widget)
+        self.setWindowTitle("ورشة طباعة - إحصائيات المستخدمين")
+        self._refresh_user_stats()
+        logger.info("فتح صفحة إحصائيات المستخدمين")
+
+    def _user_stats_back(self):
+        self._stack.setCurrentIndex(self._prev_page_index)
+        self.setWindowTitle("ورشة طباعة - لوحة تحكم المالك")
+        logger.info("رجوع من صفحة إحصائيات المستخدمين")
+
+    def _refresh_user_stats(self):
+        self._user_stats_table.setRowCount(0)
+        if self._use_api:
+            from core.database import api_get_admin_user_stats, api_get_admin_all_users
+            stats, err = api_get_admin_user_stats()
+            if err:
+                QMessageBox.warning(self, "خطأ", err)
+                return
+            self._update_stat_card(self._stat_total, stats.get("total_users", 0))
+            self._update_stat_card(self._stat_today, stats.get("today_active", 0))
+            self._update_stat_card(self._stat_inactive, stats.get("inactive_30d", 0))
+            self._update_stat_card(self._stat_never, stats.get("never_active", 0))
+            users, err2 = api_get_admin_all_users()
+            if err2:
+                QMessageBox.warning(self, "خطأ", err2)
+                return
+        else:
+            self._update_stat_card(self._stat_total, len([u for u in self._users if u != "ahmed"]))
+            self._update_stat_card(self._stat_today, "-")
+            self._update_stat_card(self._stat_inactive, "-")
+            self._update_stat_card(self._stat_never, "-")
+            users = []
+            for uname, udata in self._users.items():
+                if uname == "ahmed":
+                    continue
+                users.append({
+                    "username": uname,
+                    "shop_name": udata.get("shop_name", ""),
+                    "phone": udata.get("phone", ""),
+                    "reg_date": udata.get("reg_date", ""),
+                    "last_login": "",
+                    "active_sessions": 0,
+                    "last_sub_end": "",
+                    "status": "active",
+                })
+        status_labels = {"active": "نشط", "inactive": "غير نشط", "never_active": "لم يسجل دخول"}
+        status_colors = {"active": "#27ae60", "inactive": "#e74c3c", "never_active": "#95a5a6"}
+        for i, u in enumerate(users):
+            self._user_stats_table.insertRow(i)
+            self._user_stats_table.setItem(i, 0, QTableWidgetItem(u.get("shop_name", "")))
+            self._user_stats_table.setItem(i, 1, QTableWidgetItem(u.get("username", "")))
+            self._user_stats_table.setItem(i, 2, QTableWidgetItem(u.get("phone", "")))
+            last_login = u.get("last_login", "")
+            if len(last_login) >= 16:
+                last_login = last_login[:16].replace("T", " ")
+            self._user_stats_table.setItem(i, 3, QTableWidgetItem(last_login if last_login else "—"))
+            sub_end = u.get("last_sub_end", "")
+            self._user_stats_table.setItem(i, 4, QTableWidgetItem(sub_end if sub_end else "بدون اشتراك"))
+            status = u.get("status", "active")
+            status_item = QTableWidgetItem(status_labels.get(status, status))
+            status_item.setForeground(QColor(status_colors.get(status, "#333")))
+            self._user_stats_table.setItem(i, 5, status_item)
+        logger.info("تحديث صفحة إحصائيات المستخدمين: %d مستخدم", self._user_stats_table.rowCount())
+
+    def _on_user_stats_cell_clicked(self, row, col):
+        item = self._user_stats_table.item(row, 1)
+        if item:
+            username = item.text()
+            self._show_user_stats_detail_dialog(username)
+
+    def _show_user_stats_detail_dialog(self, username):
+        if self._use_api:
+            from core.database import api_get_user_details
+            data, err = api_get_user_details(username)
+            if err:
+                QMessageBox.warning(self, "خطأ", err)
+                return
+        else:
+            udata = self._users.get(username)
+            if not udata:
+                QMessageBox.warning(self, "خطأ", "المستخدم غير موجود")
+                return
+            data = {
+                "username": username,
+                "shop_name": udata.get("shop_name", username),
+                "phone": udata.get("phone", ""),
+                "reg_date": udata.get("reg_date", ""),
+                "remaining_days": udata.get("subscription_days", 0),
+                "subscriptions": [],
+                "active_sessions": 0,
+                "max_devices": 1,
+                "last_login": "",
+                "is_admin": False,
+            }
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"بيانات المستخدم - {data.get('shop_name', username)}")
+        dialog.setMinimumWidth(460)
+        dl = QVBoxLayout(dialog)
+        dl.setSpacing(10)
+
+        title = QLabel(f"👤 بيانات المستخدم")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #1a73e8;")
+        dl.addWidget(title)
+
+        fields = [
+            ("اسم المستخدم:", data.get("username", "")),
+            ("اسم المكتبة:", data.get("shop_name", "")),
+            ("رقم الهاتف:", data.get("phone", "")),
+            ("تاريخ التسجيل:", data.get("reg_date", "")),
+            ("آخر دخول:", data.get("last_login", "")[:16].replace("T", " ") if data.get("last_login") else "—"),
+            ("الأيام المتبقية:", str(data.get("remaining_days", 0))),
+            ("الأجهزة النشطة:", f"{data.get('active_sessions', 0)} / {data.get('max_devices', 1)}"),
+        ]
+        for label, value in fields:
+            row = QHBoxLayout()
+            lbl = QLabel(label)
+            lbl.setStyleSheet("font-size: 13px; font-weight: bold; color: #555; min-width: 120px;")
+            val = QLabel(value)
+            val.setStyleSheet("font-size: 13px; color: #333;")
+            row.addWidget(lbl)
+            row.addWidget(val)
+            row.addStretch()
+            dl.addLayout(row)
+
+        subs = data.get("subscriptions", [])
+        if subs:
+            sub_title = QLabel("📋 سجل الاشتراكات:")
+            sub_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #e67e22; margin-top: 10px;")
+            dl.addWidget(sub_title)
+            for s in subs:
+                sub_line = QLabel(f"  • من {s.get('start_date', s.get('start', ''))} إلى {s.get('end_date', s.get('end', ''))} ({s.get('days', 0)} يوم)")
+                sub_line.setStyleSheet("font-size: 12px; color: #555;")
+                dl.addWidget(sub_line)
+        else:
+            dl.addWidget(QLabel("لا توجد اشتراكات مسجلة"))
+
+        close_btn = QPushButton("إغلاق")
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background: #95a5a6; color: white; font-size: 13px;
+                padding: 6px 25px; border-radius: 8px; border: none;
+            }
+            QPushButton:hover { background: #7f8c8d; }
+        """)
+        close_btn.clicked.connect(dialog.accept)
+        dl.addWidget(close_btn, 0, Qt.AlignCenter)
+
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        dialog.raise_()
+        dialog.activateWindow()
+        dialog.exec()
 
     def _show_user_details_dialog(self, username):
         if self._use_api:

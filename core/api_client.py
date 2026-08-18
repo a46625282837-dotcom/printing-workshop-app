@@ -291,3 +291,11 @@ def delete_notification(notification_id):
 
 def get_user_details(username):
     return _request("GET", f"/api/users/{username}")
+
+
+def get_admin_user_stats():
+    return _request("GET", "/api/admin/user-stats")
+
+
+def get_admin_all_users():
+    return _request("GET", "/api/admin/all-users")

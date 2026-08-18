@@ -141,15 +141,13 @@ def init_db():
         if _is_pg:
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS token_id TEXT DEFAULT ''")
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS max_devices INTEGER DEFAULT 1")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TEXT DEFAULT ''")
         else:
-            try:
-                cur.execute("ALTER TABLE users ADD COLUMN token_id TEXT DEFAULT ''")
-            except Exception:
-                pass
-            try:
-                cur.execute("ALTER TABLE users ADD COLUMN max_devices INTEGER DEFAULT 1")
-            except Exception:
-                pass
+            for col, default in [("token_id", "''"), ("max_devices", "1"), ("last_login", "''")]:
+                try:
+                    cur.execute(f"ALTER TABLE users ADD COLUMN {col} DEFAULT {default}")
+                except Exception:
+                    pass
     except Exception:
         pass
     cur.execute(_q(f"""
@@ -198,6 +196,69 @@ def update_token_id(username, token_id):
     conn.commit()
     cur.close()
     conn.close()
+
+
+def update_last_login(username):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("UPDATE users SET last_login = %s WHERE username = %s"),
+                (datetime.utcnow().isoformat(), username))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_admin_user_stats():
+    conn = _conn()
+    cur = conn.cursor()
+    today = date.today().isoformat()
+    cur.execute(_q("SELECT COUNT(*) FROM users WHERE is_admin != 1 AND last_login LIKE %s"), (today + "%",))
+    today_count = cur.fetchone()[0]
+    cur.execute(_q("SELECT COUNT(*) FROM users WHERE is_admin != 1"))
+    total_users = cur.fetchone()[0]
+    cur.execute(_q("SELECT COUNT(*) FROM users WHERE is_admin != 1 AND (last_login = '' OR last_login IS NULL)"))
+    never_active = cur.fetchone()[0]
+    thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
+    cur.execute(_q("SELECT COUNT(*) FROM users WHERE is_admin != 1 AND last_login != '' AND last_login < %s"), (thirty_days_ago,))
+    inactive_count = cur.fetchone()
+    inactive_count = inactive_count[0] if inactive_count else 0
+    cur.close()
+    conn.close()
+    return {
+        "total_users": total_users,
+        "today_active": today_count,
+        "inactive_30d": inactive_count,
+        "never_active": never_active,
+    }
+
+
+def get_all_users_with_activity():
+    conn = _conn()
+    cur = conn.cursor()
+    thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
+    cur.execute(_q("""
+        SELECT u.username, u.shop_name, u.phone, u.reg_date, u.is_admin, u.max_devices,
+               u.last_login,
+               (SELECT COUNT(*) FROM user_sessions s WHERE s.username = u.username) AS active_sessions,
+               (SELECT end_date FROM subscriptions sub WHERE sub.username = u.username ORDER BY sub.end_date DESC LIMIT 1) AS last_sub_end
+        FROM users u WHERE u.is_admin != 1 ORDER BY u.reg_date
+    """))
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description]
+    result = []
+    for r in rows:
+        d = dict(zip(cols, r))
+        last_login = d.get("last_login") or ""
+        if not last_login:
+            d["status"] = "never_active"
+        elif last_login < thirty_days_ago:
+            d["status"] = "inactive"
+        else:
+            d["status"] = "active"
+        result.append(d)
+    cur.close()
+    conn.close()
+    return result
 
 
 def get_all_users():

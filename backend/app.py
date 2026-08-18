@@ -17,7 +17,7 @@ from .database import (
     get_pending_messages, add_pending_message, clear_pending,
     save_profile_pixmap, get_profile_pixmap,
     save_banner_pixmap, get_banner_pixmaps, delete_banner_pixmap,
-    update_token_id, get_active_session_count, add_session, remove_session,
+    update_token_id, update_last_login, get_active_session_count, add_session, remove_session,
     remove_all_sessions, remove_expired_sessions,
     update_max_devices, get_max_devices, get_user_sessions,
     get_subscription_required, set_subscription_required,
@@ -25,6 +25,7 @@ from .database import (
     mark_notification_read, mark_all_notifications_read,
     add_notification_reply, get_notification_replies, delete_notification_reply,
     delete_notification,
+    get_admin_user_stats, get_all_users_with_activity,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -142,6 +143,7 @@ def api_login():
         return jsonify({"error": f"الحساب مسجل دخول على {max_dev} أجهزة حالياً", "session_expired": True, "force_login_available": True}), 401
     token_id = str(uuid.uuid4())
     add_session(username, token_id)
+    update_last_login(username)
     token = create_access_token(identity=username, additional_claims={"tid": token_id})
     return jsonify({
         "token": token,
@@ -556,7 +558,24 @@ def api_get_user_details(username):
         "subscriptions": subs,
         "active_sessions": active,
         "max_devices": max_dev,
+        "last_login": user.get("last_login", ""),
     })
+
+
+@app.route("/api/admin/user-stats", methods=["GET"])
+@jwt_required()
+def api_admin_user_stats():
+    if get_user(get_jwt_identity()).get("is_admin") != 1:
+        return jsonify({"error": "صلاحية مطلوبة"}), 403
+    return jsonify(get_admin_user_stats())
+
+
+@app.route("/api/admin/all-users", methods=["GET"])
+@jwt_required()
+def api_admin_all_users():
+    if get_user(get_jwt_identity()).get("is_admin") != 1:
+        return jsonify({"error": "صلاحية مطلوبة"}), 403
+    return jsonify(get_all_users_with_activity())
 
 def run_server(host="0.0.0.0", port=5000, debug=False):
     logger.info("Starting backend server on %s:%s", host, port)
