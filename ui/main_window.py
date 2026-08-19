@@ -698,6 +698,7 @@ class MainWindow(QMainWindow):
                 "username": self._username,
                 "display_name": self._display_name,
                 "is_admin": self._is_admin,
+                "subscription_required": self._subscription_required,
             }, f)
 
     def _clear_session(self):
@@ -737,7 +738,7 @@ class MainWindow(QMainWindow):
                 self._username = username
                 self._display_name = sess.get("display_name", username)
                 self._is_admin = sess.get("is_admin", False)
-                self._subscription_required = True
+                self._subscription_required = bool(sess.get("subscription_required", True))
                 self._api_data = {}
                 self._update_auth_ui()
                 self._switch_to_main()
@@ -1460,6 +1461,7 @@ class MainWindow(QMainWindow):
             logger.info("تم تحديث إلزامية الاشتراك (محلي): %s", target)
         self._subscription_required = target
         self._update_sub_toggle_btn()
+        self._save_session()
         if not target:
             QMessageBox.information(self, "تم", "تم إلغاء إلزامية الاشتراك. جميع الأقسام متاحة الآن للجميع.")
         else:
