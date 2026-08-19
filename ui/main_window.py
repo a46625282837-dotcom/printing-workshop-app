@@ -1776,6 +1776,7 @@ class MainWindow(QMainWindow):
             from core.database import delete_notification
             delete_notification(nid)
         self._shown_notif_ids.discard(nid)
+        self._notif_list = [n for n in self._notif_list if n.get("id") != nid]
         self._load_notifications()
         self._refresh_notifications_list()
         logger.info("حذف الإشعار %s", nid)
@@ -2009,7 +2010,6 @@ class MainWindow(QMainWindow):
         return widget
 
     def _refresh_notification_replies(self):
-        self._replies_table.setRowCount(0)
         if self._use_api:
             from core.database import api_get_notification_replies
             data, err = api_get_notification_replies()
@@ -2020,6 +2020,7 @@ class MainWindow(QMainWindow):
         else:
             from core.database import get_notification_replies
             replies = get_notification_replies()
+        self._replies_table.setRowCount(0)
         for i, r in enumerate(replies):
             self._replies_table.insertRow(i)
             user_item = QTableWidgetItem(r.get("username", ""))
