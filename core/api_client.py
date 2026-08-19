@@ -2,6 +2,7 @@ import requests
 import base64
 import json
 import logging
+import time
 from datetime import date, timedelta
 
 logger = logging.getLogger(__name__)
@@ -83,49 +84,65 @@ def _headers():
     return h
 
 
+_SLEEPY_STATUSES = {404, 502, 503, 504}
+_RETRY_DELAY = 5
+
+
 def _request(method, path, **kwargs):
     url = f"{_SERVER_URL}{path}"
     fire_session_expired = kwargs.pop("_fire_session_expired", True)
-    try:
-        resp = requests.request(method, url, headers=_headers(), timeout=10, **kwargs)
-        body = resp.text or ""
+    last_err = None
+    for attempt in range(3):
         try:
-            payload = resp.json()
-        except Exception:
-            payload = None
-        if resp.status_code >= 400:
-            if isinstance(payload, dict):
-                err_msg = payload.get("error", f"خطأ في الخادم ({resp.status_code})")
-                if payload.get("session_expired") and fire_session_expired:
-                    set_token(None)
-                    set_username(None)
-                    if _session_expired_callback:
-                        _session_expired_callback()
+            resp = requests.request(method, url, headers=_headers(), timeout=10, **kwargs)
+            body = resp.text or ""
+            try:
+                payload = resp.json()
+            except Exception:
+                payload = None
+            if resp.status_code in _SLEEPY_STATUSES and attempt < 2:
+                logger.info("Server may be waking up (status %s), retrying in %ds...", resp.status_code, _RETRY_DELAY)
+                time.sleep(_RETRY_DELAY)
+                continue
+            if resp.status_code >= 400:
+                if isinstance(payload, dict):
+                    err_msg = payload.get("error", f"خطأ في الخادم ({resp.status_code})")
+                    if payload.get("session_expired") and fire_session_expired:
+                        set_token(None)
+                        set_username(None)
+                        if _session_expired_callback:
+                            _session_expired_callback()
+                        return None, err_msg
+                    logger.error("API error %s %s: %s", method, path, err_msg)
                     return None, err_msg
-                logger.error("API error %s %s: %s", method, path, err_msg)
-                return None, err_msg
-            logger.error("API error %s %s: status %s", method, path, resp.status_code)
+                logger.error("API error %s %s: status %s", method, path, resp.status_code)
+                return None, _server_error_message(resp.status_code)
+            if payload is not None:
+                return payload, None
             return None, _server_error_message(resp.status_code)
-        if payload is not None:
-            return payload, None
-        return None, _server_error_message(resp.status_code)
-    except requests.ConnectionError:
-        logger.error("Cannot connect to server at %s", _SERVER_URL)
-        return None, "لا يمكن الاتصال بالخادم"
-    except Exception as e:
-        logger.error("API request failed: %s", e)
-        return None, str(e)
+        except requests.ConnectionError:
+            if attempt < 2:
+                logger.info("Connection failed, retrying in %ds (attempt %d/3)...", _RETRY_DELAY, attempt + 1)
+                time.sleep(_RETRY_DELAY)
+                last_err = "لا يمكن الاتصال بالخادم"
+                continue
+            logger.error("Cannot connect to server at %s", _SERVER_URL)
+            return None, "لا يمكن الاتصال بالخادم. تأكد من اتصالك بالإنترنت"
+        except Exception as e:
+            logger.error("API request failed: %s", e)
+            return None, str(e)
+    return None, last_err or "تعذر الاتصال بالخادم"
 
 
 def _server_error_message(status):
     if status == 404:
-        return "الخادم لا يتعرف على هذه العملية. تأكد من تحديث الخادم لأحدث إصدار ثم أعد المحاولة"
+        return "الخادم غير متاح حالياً. حاول بعد قليل"
     if status == 405:
         return "الخادم لا يقبل هذه العملية. تأكد من تحديث الخادم لأحدث إصدار"
     if status == 500:
         return "حدث خطأ في الخادم (500). حاول مجدداً أو تواصل مع المالك"
     if status == 502 or status == 503 or status == 504:
-        return "الخادم غير متاح حالياً. حاول بعد قليل"
+        return "الخادم يستيقظ الآن، حاول بعد قليل"
     return f"خطأ في الخادم ({status})"
 
 
