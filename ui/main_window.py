@@ -926,6 +926,7 @@ class MainWindow(QMainWindow):
             qdata, _ = api_check_auth()
             if qdata:
                 self._api_data = qdata
+                self._subscription_required = bool(qdata.get("subscription_required", True))
             self._update_auth_ui()
             self._switch_to_main()
             self._save_session()
