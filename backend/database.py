@@ -222,11 +222,14 @@ def get_admin_user_stats():
     cur.execute(_q("SELECT COUNT(*) FROM users WHERE is_admin != 1 AND last_login != '' AND last_login < %s"), (thirty_days_ago,))
     inactive_count = cur.fetchone()
     inactive_count = inactive_count[0] if inactive_count else 0
+    cur.execute(_q("SELECT COUNT(DISTINCT username) FROM user_sessions WHERE created_at >= %s"), (today,))
+    row_active = cur.fetchone()
+    today_active = row_active[0] if row_active and row_active[0] else today_count
     cur.close()
     conn.close()
     return {
         "total_users": total_users,
-        "today_active": today_count,
+        "today_active": today_active,
         "inactive_30d": inactive_count,
         "never_active": never_active,
     }
