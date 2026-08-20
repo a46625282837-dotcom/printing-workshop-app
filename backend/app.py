@@ -127,8 +127,8 @@ def api_login():
         return jsonify({"error": "اسم المستخدم وكلمة المرور مطلوبان"}), 400
     if not verify_password(username, password):
         return jsonify({"error": "اسم المستخدم أو كلمة المرور غير صحيحة"}), 401
-    remove_all_expired_sessions(2)
-    remove_expired_sessions(username, 2)
+    remove_all_expired_sessions(config.JWT_EXPIRY_HOURS)
+    remove_expired_sessions(username, config.JWT_EXPIRY_HOURS)
     user = get_user(username)
     max_dev = get_max_devices(username) or 1
     if data.get("force_login"):
@@ -183,7 +183,6 @@ def api_register():
     if create_user(username, password, shop_name, phone):
         token_id = str(uuid.uuid4())
         update_token_id(username, token_id)
-        update_last_login(username)
         add_session(username, token_id)
         token = create_access_token(identity=username, additional_claims={"tid": token_id})
         return jsonify({"token": token, "username": username}), 201
