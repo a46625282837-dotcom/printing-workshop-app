@@ -18,7 +18,7 @@ from .database import (
     save_profile_pixmap, get_profile_pixmap,
     save_banner_pixmap, get_banner_pixmaps, delete_banner_pixmap,
     update_token_id, update_last_login, get_active_session_count, add_session, remove_session,
-    remove_all_sessions, remove_expired_sessions,
+    remove_all_sessions, remove_expired_sessions, remove_all_expired_sessions,
     update_max_devices, get_max_devices, get_user_sessions,
     get_subscription_required, set_subscription_required,
     create_notification, get_notifications_for_user, get_unread_notifications_count,
@@ -127,6 +127,7 @@ def api_login():
         return jsonify({"error": "اسم المستخدم وكلمة المرور مطلوبان"}), 400
     if not verify_password(username, password):
         return jsonify({"error": "اسم المستخدم أو كلمة المرور غير صحيحة"}), 401
+    remove_all_expired_sessions(config.JWT_EXPIRY_HOURS)
     remove_expired_sessions(username, config.JWT_EXPIRY_HOURS)
     user = get_user(username)
     max_dev = get_max_devices(username) or 1
