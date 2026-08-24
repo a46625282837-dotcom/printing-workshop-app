@@ -67,7 +67,7 @@ def _register_wwk_extension():
         logging.warning("فشل تسجيل امتداد .wwk: %s", e)
 
 
-APP_VERSION = "1.3.8"
+APP_VERSION = "1.3.9"
 _GITHUB_REPO = "a46625282837-dotcom/printing-workshop-app"
 
 

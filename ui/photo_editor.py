@@ -1350,12 +1350,16 @@ class PhotoEditor(QWidget):
 
     def _open_printer_properties(self):
         printer_name = get_selected_printer_name()
-        printer = QPrinter()
-        if printer_name:
-            printer.setPrinterName(printer_name)
-        dialog = QPrintDialog(printer, self)
-        dialog.setWindowTitle("خصائص الطابعة")
-        if dialog.exec() == QDialog.Accepted:
-            if printer.printerName():
-                set_printer_name(printer.printerName())
-            logger.info("تم تعديل خصائص الطابعة: %s", printer.printerName())
+        if not printer_name:
+            from PySide6.QtPrintSupport import QPrinterInfo
+            printers = QPrinterInfo.availablePrinters()
+            if printers:
+                printer_name = printers[0].printerName()
+        if not printer_name:
+            QMessageBox.information(self, "تنبيه", "لا توجد طابعة متصلة.")
+            return
+        try:
+            import win32print
+            win32print.DocumentProperties(0, 0, printer_name, None, None, win32print.DM_IN_PROMPT)
+        except Exception as e:
+            logger.warning("فشل فتح خصائص الطابعة: %s", e)
