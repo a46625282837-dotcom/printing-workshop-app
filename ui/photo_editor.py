@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QVBoxLayout,
                                QSlider, QSplitter, QGroupBox, QGridLayout)
 from PySide6.QtCore import Qt, Signal, QRectF, QSettings, QThread, QEvent, QBuffer, QByteArray, QIODevice
 from PySide6.QtGui import QPixmap, QImage, QPen, QColor, QBrush, QPainter, QShortcut, QKeySequence, QPainterPath, QAction, QPageSize
-from PySide6.QtPrintSupport import QPrinter
+from PySide6.QtPrintSupport import QPrinter, QPrintDialog
 from PIL import Image
 from core.printer import print_scene, get_selected_printer_name, set_printer_name, set_last_paper_type
 from ui.a4_editor import PrintSetupDialog, A4_W, A4_H, MARGIN
@@ -902,6 +902,9 @@ class PhotoEditor(QWidget):
         btn_add.clicked.connect(self._add_image_dialog)
         btn_print = QPushButton("طباعة")
         btn_print.clicked.connect(self._print_page)
+        btn_printer_props = QPushButton("⚙ خصائص الطابعة")
+        btn_printer_props.setToolTip("تعديل إعدادات الطابعة: الجودة، اللون، مصدر الورق...")
+        btn_printer_props.clicked.connect(self._open_printer_properties)
         btn_save_pdf = QPushButton("حفظ PDF")
         btn_save_pdf.clicked.connect(self._save_pdf)
         btn_clear = QPushButton("تفريغ الكل")
@@ -916,6 +919,7 @@ class PhotoEditor(QWidget):
         btn_bar.addWidget(btn_back)
         btn_bar.addWidget(btn_add)
         btn_bar.addWidget(btn_print)
+        btn_bar.addWidget(btn_printer_props)
         btn_bar.addWidget(btn_save_pdf)
         btn_bar.addWidget(btn_clear)
         btn_add_page = QPushButton("➕ إضافة صفحة")
@@ -1343,3 +1347,15 @@ class PhotoEditor(QWidget):
                         page_range=dialog.page_range(), paper_type=pt)
             for item in selected:
                 item.setSelected(True)
+
+    def _open_printer_properties(self):
+        printer_name = get_selected_printer_name()
+        printer = QPrinter()
+        if printer_name:
+            printer.setPrinterName(printer_name)
+        dialog = QPrintDialog(printer, self)
+        dialog.setWindowTitle("خصائص الطابعة")
+        if dialog.exec() == QDialog.Accepted:
+            if printer.printerName():
+                set_printer_name(printer.printerName())
+            logger.info("تم تعديل خصائص الطابعة: %s", printer.printerName())
