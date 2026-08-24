@@ -1,25 +1,59 @@
 import logging
+import ctypes
+import ctypes.wintypes as wt
 from PySide6.QtPrintSupport import QPrinter, QPrinterInfo
 from PySide6.QtGui import QPainter, QPageSize
-from PySide6.QtCore import QRectF
+from PySide6.QtCore import QRectF, QSettings
 from PySide6.QtWidgets import QGraphicsScene, QWidget, QMessageBox, QInputDialog
+
+PHOTO_PAPER_KEYWORDS = ["ورق صور"]
+
+
+def _is_photo_paper(paper_type_name):
+    if not paper_type_name:
+        return False
+    return any(kw in paper_type_name for kw in PHOTO_PAPER_KEYWORDS)
 
 logger = logging.getLogger(__name__)
 
 A4_WIDTH_MM = 210
 A4_HEIGHT_MM = 297
 
-_selected_printer_name = None
+_settings = QSettings("ورشة طباعة", "Printer")
+_selected_printer_name = _settings.value("default_printer", None)
+_last_paper_type = _settings.value("last_paper_type", None)
+
+PAPER_TYPES = {
+    "ورق عادي": 1,
+    "ورق بوند": 2,
+    "ورق مدعم": 8,
+    "ورق صور لامع 180 غ": 256,
+    "ورق صور لامع 230 غ": 257,
+    "ورق صور غير لامع 180 غ": 258,
+    "ورق صور غير لامع 230 غ": 259,
+    "كرتون": 260,
+    "شفاف": 261,
+    "ورق معاد تدويره": 262,
+    "كرافت": 263,
+    "مظروف": 264,
+    "ملصقات": 265,
+}
+
+PAPER_TYPE_NAMES = list(PAPER_TYPES.keys())
 
 
 def get_selected_printer_name():
+    global _selected_printer_name
+    if _selected_printer_name is None:
+        _selected_printer_name = _settings.value("default_printer", None)
     return _selected_printer_name
 
 
 def set_printer_name(name):
     global _selected_printer_name
     _selected_printer_name = name
-    logger.info("تم تعيين الطابعة: %s", name)
+    _settings.setValue("default_printer", name)
+    logger.info("تم تعيين الطابعة الافتراضية: %s", name)
 
 
 def select_printer(parent):
@@ -36,12 +70,55 @@ def select_printer(parent):
         logger.info("تم إلغاء اختيار الطابعة")
         return False
     _selected_printer_name = name
+    _settings.setValue("default_printer", name)
     logger.info("تم اختيار الطابعة: %s", name)
     return True
 
 
+def get_last_paper_type():
+    global _last_paper_type
+    v = _settings.value("last_paper_type", None)
+    if v and v in PAPER_TYPES:
+        _last_paper_type = v
+    return _last_paper_type
+
+
+def set_last_paper_type(name):
+    global _last_paper_type
+    if name in PAPER_TYPES:
+        _last_paper_type = name
+        _settings.setValue("last_paper_type", name)
+        logger.info("تم تعيين نوع الورق: %s", name)
+
+
+def _apply_paper_type(printer_name, paper_type_name):
+    media_type = PAPER_TYPES.get(paper_type_name)
+    if media_type is None:
+        return
+    try:
+        winspool = ctypes.WinDLL('winspool.drv')
+        h_printer = wt.HANDLE()
+        if not winspool.OpenPrinterW(printer_name, ctypes.byref(h_printer), None):
+            logger.warning("فشل فتح الطابعة لتطبيق نوع الورق")
+            return
+        try:
+            dm_size = winspool.DocumentPropertiesW(0, h_printer, printer_name, None, None, 0)
+            if dm_size <= 0:
+                return
+            dm = (ctypes.c_byte * dm_size)()
+            if winspool.DocumentPropertiesW(0, h_printer, printer_name, dm, None, 2) < 0:
+                return
+            ctypes.memmove(ctypes.addressof(dm) + 148, ctypes.byref(ctypes.c_ulong(media_type)), 4)
+            winspool.DocumentPropertiesW(0, h_printer, printer_name, dm, dm, 10)
+            logger.info("dmMediaType=%d for %s", media_type, paper_type_name)
+        finally:
+            winspool.ClosePrinter(h_printer)
+    except Exception as e:
+        logger.warning("DEVMODE paper type failed: %s", e)
+
+
 def print_scene(parent: QWidget, scenes, copies: int = 1, page_count: int = 1, duplex: bool = False,
-                page_range=None):
+                page_range=None, paper_type: str = None):
     single_with_pages = isinstance(scenes, QGraphicsScene) and page_count > 1
     if single_with_pages:
         scene = scenes
@@ -69,19 +146,28 @@ def print_scene(parent: QWidget, scenes, copies: int = 1, page_count: int = 1, d
     if not selected:
         QMessageBox.warning(parent, "خطأ",
                             f"الطابعة '{_selected_printer_name}' غير متصلة حالياً. اختر طابعة أخرى.")
-        _selected_printer_name = None
         return
     printer = QPrinter(selected)
+    is_photo = _is_photo_paper(paper_type)
+    if is_photo:
+        printer.setResolution(600)
+    else:
+        printer.setResolution(300)
     printer.setPageSize(QPageSize(QPageSize.A4))
     printer.setFullPage(False)
     printer.setCopyCount(max(1, int(copies)))
     printer.setDuplex(QPrinter.DuplexMode.DuplexLongSide if duplex else QPrinter.DuplexMode.DuplexNone)
+    if paper_type:
+        _apply_paper_type(printer.printerName(), paper_type)
     logger.info("طباعة %d نسخ من %d صفحة%s على: %s",
                 copies, len(pages_to_print), " (وجهين)" if duplex else "", printer.printerName())
     painter = QPainter(printer)
     if not painter.isActive():
         logger.error("فشل بدء الرسم على الطابعة")
         return
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
     try:
         page_rect = printer.pageRect(QPrinter.Millimeter)
         scale_x = page_rect.width() / A4_WIDTH_MM

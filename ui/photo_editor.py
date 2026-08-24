@@ -1,16 +1,17 @@
 import logging
 import io
+import numpy as np
 from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QVBoxLayout,
                                QPushButton, QWidget, QHBoxLayout, QFileDialog,
                                QMessageBox, QLabel, QGraphicsPixmapItem,
                                QGraphicsItem, QGraphicsRectItem, QDialog, QStyle,
                                QMenu, QInputDialog, QComboBox, QProgressBar,
                                QSlider, QSplitter, QGroupBox, QGridLayout)
-from PySide6.QtCore import Qt, Signal, QRectF, QSettings, QThread, QEvent
+from PySide6.QtCore import Qt, Signal, QRectF, QSettings, QThread, QEvent, QBuffer, QByteArray, QIODevice
 from PySide6.QtGui import QPixmap, QImage, QPen, QColor, QBrush, QPainter, QShortcut, QKeySequence, QPainterPath, QAction, QPageSize
 from PySide6.QtPrintSupport import QPrinter
 from PIL import Image
-from core.printer import print_scene, get_selected_printer_name, set_printer_name
+from core.printer import print_scene, get_selected_printer_name, set_printer_name, set_last_paper_type
 from ui.a4_editor import PrintSetupDialog, A4_W, A4_H, MARGIN
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class PhotoItem(QGraphicsPixmapItem):
         self._rotation = 0
         self._original_pixmap = pixmap
         self._crop_rect = None
+        self._adjust_settings = {}
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
 
@@ -75,12 +77,18 @@ class PhotoItem(QGraphicsPixmapItem):
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        dialog = PhotoCropDialog(self._original_pixmap, None, slot_size=(self._pw, self._ph), crop_rect=self._crop_rect)
+        dialog = PhotoCropDialog(
+            self._original_pixmap, None,
+            slot_size=(self._pw, self._ph),
+            crop_rect=self._crop_rect,
+            saved_settings=self._adjust_settings,
+        )
         if dialog.exec() != QDialog.Accepted:
             return
         result, settings = dialog.result_pixmap, dialog.strength_value
         if result is not None:
             self._crop_rect = dialog.crop_rect
+            self._adjust_settings = dialog.current_settings()
             self.setPixmap(result)
             self.setSelected(False)
             self._rotation = 0
@@ -233,10 +241,11 @@ class _ControlPanel(QWidget):
         return {key: w.slider.value() for key, w in self._groups.items()}
 
 
+
 class PhotoCropDialog(QDialog):
-    def __init__(self, pixmap: QPixmap, parent=None, slot_size=None, crop_rect=None):
+    def __init__(self, pixmap: QPixmap, parent=None, slot_size=None, crop_rect=None, saved_settings=None):
         super().__init__(parent)
-        self.setWindowTitle("قص وتحرير الصورة")
+        self.setWindowTitle("تحسين الصورة")
         self._original = pixmap
         self._current = pixmap
         self._after_pixmap = None
@@ -246,7 +255,10 @@ class PhotoCropDialog(QDialog):
         self._overlay = None
         self._initialized = False
         self.crop_rect = crop_rect
+        self._sliders = {}
+        self._saved_settings = saved_settings or {}
         self._setup_ui()
+        self._restore_settings()
         self._add_shortcuts()
 
     def _setup_ui(self):
@@ -254,7 +266,6 @@ class PhotoCropDialog(QDialog):
         main.setContentsMargins(0, 0, 0, 0)
         main.setSpacing(0)
 
-        # Toolbar
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(8, 4, 8, 4)
         for text, slot in [("تكبير", lambda: self._zoom_step(1.25)),
@@ -264,18 +275,15 @@ class PhotoCropDialog(QDialog):
             btn.setStyleSheet("background:#333;color:#eee;border-radius:4px;padding:4px 10px;")
             btn.clicked.connect(slot)
             toolbar.addWidget(btn)
-
         toolbar.addStretch()
         self._lbl_size = QLabel(f"{self._original.width()}×{self._original.height()}")
         self._lbl_size.setStyleSheet("color:#888;")
         toolbar.addWidget(self._lbl_size)
         main.addLayout(toolbar)
 
-        # Splitter: left = image, right = controls
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(1)
 
-        # Left panel
         left_w = QWidget()
         left_layout = QVBoxLayout(left_w)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -286,24 +294,71 @@ class PhotoCropDialog(QDialog):
         self.view.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.view.setDragMode(QGraphicsView.ScrollHandDrag)
         left_layout.addWidget(self.view)
-
         self._overlay = _CropOverlay(self.scene, QRectF(self._pixmap_item.pos(), self._pixmap_item.boundingRect().size()))
         if self.crop_rect:
             self._overlay.set_rect(QRectF(*self.crop_rect))
         splitter.addWidget(left_w)
 
-        # Right panel
         right_w = QWidget()
+        right_w.setFixedWidth(220)
         right_layout = QVBoxLayout(right_w)
-        right_layout.setContentsMargins(6, 4, 6, 4)
-        self._panel = _ControlPanel()
-        self._panel.autoEnhanceRequested.connect(self._trigger_auto_enhance)
-        right_layout.addWidget(self._panel)
-        splitter.addWidget(right_w)
+        right_layout.setContentsMargins(10, 10, 10, 10)
+        right_layout.setSpacing(6)
 
+        lbl_title = QLabel("إعدادات التعديل")
+        lbl_title.setStyleSheet("font-size:14px;font-weight:bold;color:#1a73e8;")
+        lbl_title.setAlignment(Qt.AlignCenter)
+        right_layout.addWidget(lbl_title)
+
+        self._sliders = {}
+        slider_defs = [
+            ("تنعيم البشرة", "skin_smooth", -100, 100, 0),
+            ("إزالة العيوب", "blemish", -100, 100, 0),
+            ("تقليل الظلال", "shadow", -100, 100, 0),
+            ("السطوع", "brightness", -100, 100, 0),
+            ("التباين", "contrast", -100, 100, 0),
+            ("التشبع", "saturation", -100, 100, 0),
+            ("الشحذ", "sharpness", -100, 100, 0),
+        ]
+
+        for label, key, min_v, max_v, default in slider_defs:
+            sl = self._make_slider_group(label, min_v, max_v, default)
+            right_layout.addWidget(sl)
+            self._sliders[key] = sl
+
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 0)
+        self._progress.setFixedHeight(6)
+        self._progress.setTextVisible(False)
+        self._progress.setStyleSheet(
+            "QProgressBar{background:#eee;border:none;border-radius:3px;}"
+            "QProgressBar::chunk{background:#e67e22;border-radius:3px;}"
+        )
+        self._progress.hide()
+        right_layout.addWidget(self._progress)
+
+        self._lbl_status = QLabel("")
+        self._lbl_status.setStyleSheet("color:#888;font-size:11px;")
+        self._lbl_status.setAlignment(Qt.AlignCenter)
+        self._lbl_status.setWordWrap(True)
+        right_layout.addWidget(self._lbl_status)
+
+        btn_reset = QPushButton("إعادة الصورة الأصلية")
+        btn_reset.setStyleSheet(
+            "QPushButton{background:#555;color:#eee;border:none;"
+            "border-radius:4px;padding:6px;}"
+            "QPushButton:hover{background:#777;}"
+        )
+        btn_reset.clicked.connect(self._reset_to_original)
+        right_layout.addWidget(btn_reset)
+
+        right_layout.addStretch()
+
+        splitter.addWidget(right_w)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
         main.addWidget(splitter)
 
-        # Buttons bar
         btn_bar = QHBoxLayout()
         btn_bar.setContentsMargins(8, 6, 8, 6)
         for text, slot, style in [
@@ -323,7 +378,16 @@ class PhotoCropDialog(QDialog):
         QShortcut(QKeySequence("Return"), self, self._apply)
         QShortcut(QKeySequence("Enter"), self, self._apply)
         QShortcut(QKeySequence("Escape"), self, self.reject)
-        QShortcut(QKeySequence("R"), self, self._panel._reset_all)
+
+    def _restore_settings(self):
+        for key, val in self._saved_settings.items():
+            if key in self._sliders:
+                self._sliders[key].slider.setValue(val)
+        if self._saved_settings:
+            self._apply_adjustments()
+
+    def current_settings(self) -> dict:
+        return {k: s.slider.value() for k, s in self._sliders.items()}
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -345,113 +409,279 @@ class PhotoCropDialog(QDialog):
             return None
         return r.toRect()
 
-    def _preview(self):
-        settings = self._panel.settings()
-        from core.photo_processor import enhance_portrait_advanced
-        from PIL import Image
-        from PySide6.QtCore import QBuffer, QIODevice, QByteArray
-        from PySide6.QtWidgets import QApplication
+    def _make_slider_group(self, label_text, min_v, max_v, default):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        lbl = QLabel(label_text)
+        lbl.setStyleSheet("font-size:11px;color:#ccc;")
+        lay.addWidget(lbl)
+        row = QHBoxLayout()
+        row.setSpacing(2)
+        btn_left = QPushButton("\u25c0")
+        btn_left.setFixedSize(22, 22)
+        btn_left.setStyleSheet(
+            "QPushButton{background:#444;color:#ccc;border:none;border-radius:3px;font-size:10px;}"
+            "QPushButton:hover{background:#666;color:white;}"
+        )
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(min_v, max_v)
+        slider.setValue(default)
+        slider.valueChanged.connect(self._on_slider_changed)
+        btn_right = QPushButton("\u25b6")
+        btn_right.setFixedSize(22, 22)
+        btn_right.setStyleSheet(
+            "QPushButton{background:#444;color:#ccc;border:none;border-radius:3px;font-size:10px;}"
+            "QPushButton:hover{background:#666;color:white;}"
+        )
+        val_lbl = QLabel(str(default))
+        val_lbl.setFixedWidth(30)
+        val_lbl.setAlignment(Qt.AlignCenter)
+        val_lbl.setStyleSheet("font-size:11px;color:#aaa;")
+        slider.valueChanged.connect(lambda v, lbl=val_lbl: lbl.setText(str(v)))
+        btn_left.clicked.connect(lambda: slider.setValue(slider.value() - 1))
+        btn_right.clicked.connect(lambda: slider.setValue(slider.value() + 1))
+        row.addWidget(btn_left)
+        row.addWidget(slider, 1)
+        row.addWidget(btn_right)
+        row.addWidget(val_lbl)
+        lay.addLayout(row)
+        w.slider = slider
+        return w
 
-        source = self._original
-        crop_rect = self._get_crop_rect()
-        if crop_rect:
-            source = source.copy(crop_rect)
+    def _on_slider_changed(self, _):
+        from PySide6.QtCore import QTimer
+        if not hasattr(self, '_debounce_timer'):
+            self._debounce_timer = QTimer(self)
+            self._debounce_timer.setSingleShot(True)
+            self._debounce_timer.setInterval(50)
+            self._debounce_timer.timeout.connect(self._apply_adjustments)
+        self._debounce_timer.start()
 
-        if self._slot_size and crop_rect:
-            from core.photo_processor import TARGET_DPI
-            pw_px = int(self._slot_size[0] / 25.4 * TARGET_DPI)
-            ph_px = int(self._slot_size[1] / 25.4 * TARGET_DPI)
-            source = source.scaled(pw_px, ph_px,
-                                   Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-
-        qimg = source.toImage()
-        ba = QByteArray()
-        buf = QBuffer(ba)
-        buf.open(QIODevice.WriteOnly)
-        qimg.save(buf, "PNG")
-        buf.close()
-        pil = Image.open(io.BytesIO(ba.data())).convert("RGBA")
-
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            pil = enhance_portrait_advanced(pil, settings)
-        finally:
-            QApplication.restoreOverrideCursor()
-
-        buf2 = io.BytesIO()
-        pil.save(buf2, "PNG")
-        buf2.seek(0)
-        self._after_pixmap = QPixmap()
-        self._after_pixmap.loadFromData(buf2.getvalue(), "PNG")
-        self._current = QPixmap(self._after_pixmap)
-
+    def _reset_to_original(self):
+        self._current = self._original
+        self._orig_bgr = None
+        self._cached_face_mask = None
         self.scene.clear()
-        self._pixmap_item = self.scene.addPixmap(self._after_pixmap)
+        self._pixmap_item = self.scene.addPixmap(self._original)
         self._overlay = _CropOverlay(self.scene, QRectF(self._pixmap_item.pos(), self._pixmap_item.boundingRect().size()))
+        if self.crop_rect:
+            self._overlay.set_rect(QRectF(*self.crop_rect))
         self._zoom_fit()
-        active = {k: v for k, v in settings.items() if v > 0}
-        logger.info("معاينة التحرير: %s%s", active or "بدون تحسين",
-                     " مع القص" if crop_rect else "")
+        for sl in self._sliders.values():
+            sl.slider.setValue(0)
+        self._lbl_status.setText("تمت إعادة الصورة الأصلية")
 
-    def _trigger_auto_enhance(self):
-        from core.photo_processor import enhance_auto_remini
-        from PIL import Image
-        from PySide6.QtCore import QBuffer, QIODevice, QByteArray
-        from PySide6.QtWidgets import QApplication
-
-        source = self._original
-        crop_rect = self._get_crop_rect()
-        if crop_rect:
-            source = source.copy(crop_rect)
-
-        if self._slot_size and crop_rect:
-            from core.photo_processor import TARGET_DPI
-            pw_px = int(self._slot_size[0] / 25.4 * TARGET_DPI)
-            ph_px = int(self._slot_size[1] / 25.4 * TARGET_DPI)
-            source = source.scaled(pw_px, ph_px,
-                                   Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-
-        qimg = source.toImage()
-        ba = QByteArray()
-        buf = QBuffer(ba)
-        buf.open(QIODevice.WriteOnly)
-        qimg.save(buf, "PNG")
-        buf.close()
-        pil = Image.open(io.BytesIO(ba.data())).convert("RGBA")
-
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+    def _apply_adjustments(self):
+        import cv2
         try:
-            pil = enhance_auto_remini(pil)
-        finally:
-            QApplication.restoreOverrideCursor()
+            self._do_adjustments(cv2)
+        except Exception as e:
+            logger.error("فشل تطبيق التعديلات: %s", e, exc_info=True)
 
-        buf2 = io.BytesIO()
-        pil.save(buf2, "PNG")
-        buf2.seek(0)
-        self._after_pixmap = QPixmap()
-        self._after_pixmap.loadFromData(buf2.getvalue(), "PNG")
-        self._current = QPixmap(self._after_pixmap)
-        self._original = QPixmap(self._current)
+    def _do_adjustments(self, cv2):
+        vals = {k: s.slider.value() for k, s in self._sliders.items()}
+        if all(v == 0 for v in vals.values()):
+            self._current = self._original
+            self._save_crop_from_overlay()
+            self.scene.clear()
+            self._pixmap_item = self.scene.addPixmap(self._original)
+            self._overlay = _CropOverlay(self.scene, QRectF(self._pixmap_item.pos(), self._pixmap_item.boundingRect().size()))
+            if self.crop_rect:
+                self._overlay.set_rect(QRectF(*self.crop_rect))
+            self._zoom_fit()
+            return
 
+        if not hasattr(self, '_orig_bgr') or self._orig_bgr is None:
+            ba = QByteArray()
+            buf = QBuffer(ba)
+            buf.open(QIODevice.WriteOnly)
+            self._original.toImage().save(buf, "PNG")
+            buf.close()
+            raw = bytes(ba.data())
+            arr = np.frombuffer(raw, np.uint8)
+            self._orig_bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if self._orig_bgr is None or len(self._orig_bgr.shape) < 3:
+                logger.error("فشل استخراج الصورة: shape=%s",
+                             getattr(self._orig_bgr, 'shape', None))
+                return
+            if self._orig_bgr.shape[2] == 4:
+                self._orig_bgr = cv2.cvtColor(self._orig_bgr, cv2.COLOR_BGRA2BGR)
+            logger.info("_orig_bgr OK: shape=%s dtype=%s", self._orig_bgr.shape, self._orig_bgr.dtype)
+
+        img_bgr = self._orig_bgr.copy()
+
+        if vals["brightness"] != 0:
+            img_bgr = cv2.convertScaleAbs(img_bgr, alpha=1.0, beta=vals["brightness"] * 0.8)
+
+        if vals["contrast"] != 0:
+            f = 1.0 + vals["contrast"] / 100.0
+            img_bgr = cv2.convertScaleAbs(img_bgr, alpha=f, beta=0)
+
+        if vals["saturation"] != 0:
+            hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+            factor = 1.0 + vals["saturation"] / 100.0
+            hsv[:, :, 1] = np.clip(hsv[:, :, 1] * factor, 0, 255)
+            img_bgr = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+        if vals["sharpness"] != 0:
+            amt = vals["sharpness"] / 100.0
+            if amt > 0:
+                blurred = cv2.GaussianBlur(img_bgr, (0, 0), 3)
+                img_bgr = cv2.addWeighted(img_bgr, 1 + amt, blurred, -amt, 0)
+            else:
+                ksize = max(3, int(abs(amt) * 10) + 1)
+                if ksize % 2 == 0:
+                    ksize += 1
+                img_bgr = cv2.GaussianBlur(img_bgr, (ksize, ksize), 0)
+
+        skin_strength = vals["skin_smooth"] / 100.0
+        blemish_strength = vals["blemish"] / 100.0
+        shadow_strength = vals["shadow"] / 100.0
+
+        if skin_strength != 0 or blemish_strength != 0 or shadow_strength != 0:
+            if not hasattr(self, '_cached_face_mask') or self._cached_face_mask is None:
+                self._cached_face_mask = self._detect_face_mask_cv(self._orig_bgr)
+            face_mask = self._cached_face_mask
+            if face_mask is None:
+                h, w = img_bgr.shape[:2]
+                face_mask = np.full((h, w), 255, dtype=np.uint8)
+            if blemish_strength != 0:
+                img_bgr = self._remove_blemishes_cv(img_bgr, face_mask, blemish_strength)
+            if shadow_strength != 0:
+                img_bgr = self._reduce_shadows_cv(img_bgr, face_mask, shadow_strength)
+            if skin_strength != 0:
+                img_bgr = self._smooth_skin_cv(img_bgr, face_mask, skin_strength)
+
+        rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        bpl = ch * w
+        qimg_out = QImage(rgb.data, w, h, bpl, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg_out.copy())
+        if pixmap.isNull():
+            _, png = cv2.imencode('.png', rgb)
+            pixmap = QPixmap()
+            pixmap.loadFromData(png.tobytes(), "PNG")
+        self._current = pixmap
+        self._save_crop_from_overlay()
         self.scene.clear()
-        self._pixmap_item = self.scene.addPixmap(self._after_pixmap)
+        self._pixmap_item = self.scene.addPixmap(self._current)
         self._overlay = _CropOverlay(self.scene, QRectF(self._pixmap_item.pos(), self._pixmap_item.boundingRect().size()))
+        if self.crop_rect:
+            self._overlay.set_rect(QRectF(*self.crop_rect))
         self._zoom_fit()
 
-        for w in self._panel._groups.values():
-            w.slider.blockSignals(True)
-            w.slider.setValue(0)
-            w.slider.blockSignals(False)
+    def _save_crop_from_overlay(self):
+        if self._overlay:
+            r = self._overlay.rect()
+            if r.width() > 2 and r.height() > 2:
+                self.crop_rect = (int(r.x()), int(r.y()), int(r.width()), int(r.height()))
 
-        logger.info("تحسين تلقائي كامل")
+    def _update_scene(self):
+        self.scene.clear()
+        self._pixmap_item = self.scene.addPixmap(self._current)
+        self._overlay = _CropOverlay(self.scene, QRectF(self._pixmap_item.pos(), self._pixmap_item.boundingRect().size()))
+        if self.crop_rect:
+            self._overlay.set_rect(QRectF(*self.crop_rect))
+        self._zoom_fit()
+
+    def _detect_face_mask_cv(self, bgr):
+        import cv2
+        try:
+            import mediapipe as mp
+            mesh = mp.solutions.face_mesh.FaceMesh(
+                static_image_mode=True, max_num_faces=5, min_detection_confidence=0.3
+            )
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            h, w = rgb.shape[:2]
+            results = mesh.process(rgb)
+            if results.multi_face_landmarks:
+                mask = np.zeros((h, w), dtype=np.uint8)
+                oval = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323,
+                        361, 288, 397, 365, 379, 378, 400, 377, 152, 148,
+                        176, 149, 150, 136, 172, 58, 132, 93, 234, 127,
+                        162, 21, 54, 103, 67, 109]
+                for fl in results.multi_face_landmarks:
+                    pts = [[int(fl.landmark[i].x * w), int(fl.landmark[i].y * h)] for i in oval]
+                    cv2.fillConvexPoly(mask, np.array(pts), 255)
+                mask = cv2.GaussianBlur(mask, (21, 21), 0)
+                return mask
+        except Exception:
+            pass
+        return None
+
+    def _smooth_skin_cv(self, img, mask, strength):
+        import cv2
+        strength = min(abs(strength), 1.0)
+        smoothed = cv2.bilateralFilter(img, 7, 40, 40)
+        mask_f = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (15, 15), 0)
+        mask_f = np.clip(mask_f * strength, 0, 1)[:, :, np.newaxis]
+        return np.clip(img.astype(np.float32) * (1 - mask_f) + smoothed.astype(np.float32) * mask_f, 0, 255).astype(np.uint8)
+
+    def _remove_blemishes_cv(self, img, mask, strength):
+        import cv2
+        strength = min(abs(strength), 1.0)
+        threshold = 8 - strength * 5
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        blurred_large = cv2.GaussianBlur(gray.astype(np.float32), (31, 31), 0)
+        diff = blurred_large - gray.astype(np.float32)
+        dark_spots = (diff > threshold).astype(np.uint8) * 255
+        dark_spots = cv2.bitwise_and(dark_spots, mask)
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        dark_spots = cv2.morphologyEx(dark_spots, cv2.MORPH_OPEN, k)
+        dark_spots = cv2.morphologyEx(dark_spots, cv2.MORPH_CLOSE, k)
+        nlabels, labels, stats, _ = cv2.connectedComponentsWithStats(dark_spots, connectivity=8)
+        for i in range(1, nlabels):
+            area = stats[i, cv2.CC_STAT_AREA]
+            if area < 3 or area > 800:
+                continue
+            x = stats[i, cv2.CC_STAT_LEFT]
+            y = stats[i, cv2.CC_STAT_TOP]
+            w_cc = stats[i, cv2.CC_STAT_WIDTH]
+            h_cc = stats[i, cv2.CC_STAT_HEIGHT]
+            pad = max(w_cc, h_cc) // 2 + 4
+            y1, y2 = max(0, y - pad), min(img.shape[0], y + h_cc + pad)
+            x1, x2 = max(0, x - pad), min(img.shape[1], x + w_cc + pad)
+            roi = img[y1:y2, x1:x2]
+            if roi.size == 0:
+                continue
+            roi_blur = cv2.GaussianBlur(roi, (9, 9), 0)
+            cmask = (labels[y1:y2, x1:x2] == i).astype(np.float32)
+            cmask = cv2.GaussianBlur(cmask, (9, 9), 0)[:, :, np.newaxis]
+            img[y1:y2, x1:x2] = np.clip(roi.astype(np.float32) * (1 - cmask) + roi_blur.astype(np.float32) * cmask, 0, 255).astype(np.uint8)
+        return img
+
+    def _reduce_shadows_cv(self, img, mask, strength):
+        import cv2
+        strength = min(abs(strength), 1.0)
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        l_f = l.astype(np.float32)
+        face_f = cv2.GaussianBlur(mask.astype(np.float32), (31, 31), 0) / 255.0
+        local_mean = cv2.GaussianBlur(l_f, (51, 51), 0)
+        shadow_map = np.clip(local_mean - l_f, 0, 255)
+        shadow_mask = np.clip(shadow_map / 30.0, 0, 1.0) * face_f * strength
+        lift = 25 * strength
+        l_final = np.clip(l_f + shadow_mask * lift, 0, 255)
+        lab = cv2.merge([l_final.astype(np.uint8), a, b])
+        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
     def _apply(self):
-        self._preview()
         cr = self._get_crop_rect()
         if cr is not None:
-            self.crop_rect = (cr.x(), cr.y(), cr.width(), cr.height())
-        self.result_pixmap = self._current
-        self.strength_value = self._panel.settings()
+            rx = max(0, cr.x())
+            ry = max(0, cr.y())
+            rw = min(cr.width(), self._current.width() - rx)
+            rh = min(cr.height(), self._current.height() - ry)
+            if rw > 2 and rh > 2:
+                self.result_pixmap = self._current.copy(int(rx), int(ry), int(rw), int(rh))
+                self.crop_rect = (int(rx), int(ry), int(rw), int(rh))
+            else:
+                self.result_pixmap = self._current
+        else:
+            self.result_pixmap = self._current
+        self.strength_value = 0
         self.accept()
 
 
@@ -1093,7 +1323,7 @@ class PhotoEditor(QWidget):
             QMessageBox.information(self, "تنبيه", "لا توجد صور للطباعة.")
             return
         if getattr(self, 'subscription_check', lambda: True)():
-            dialog = PrintSetupDialog(self, page_count=self._num_pages)
+            dialog = PrintSetupDialog(self, page_count=self._num_pages, default_paper_type="ورق صور لامع 180 غ")
             if dialog.exec() != QDialog.Accepted:
                 return
             printer_name = dialog.selected_printer()
@@ -1101,12 +1331,15 @@ class PhotoEditor(QWidget):
             duplex = dialog.duplex()
             if printer_name:
                 set_printer_name(printer_name)
+            pt = dialog.paper_type()
+            if pt:
+                set_last_paper_type(pt)
             logger.info("طلب طباعة %d نسخ من %d صفحة%s على: %s",
                         copies, self._num_pages, " (وجهين)" if duplex else "", printer_name)
             selected = self.scene.selectedItems()
             for item in selected:
                 item.setSelected(False)
             print_scene(self, self.scene, copies=copies, page_count=self._num_pages, duplex=duplex,
-                        page_range=dialog.page_range())
+                        page_range=dialog.page_range(), paper_type=pt)
             for item in selected:
                 item.setSelected(True)

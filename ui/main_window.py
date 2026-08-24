@@ -12,12 +12,14 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
 from PySide6.QtGui import QAction
 from PySide6.QtCore import Qt, QSize, Signal, QDate, QTimer
 from PySide6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QBrush, QFont
-from PySide6.QtWidgets import QGraphicsDropShadowEffect
+from PySide6.QtWidgets import QGraphicsDropShadowEffect, QLayout, QLayoutItem, QScrollArea
 from datetime import date, timedelta
 
 from ui.a4_editor import A4Editor
 from ui.photo_editor import PhotoEditor
 from ui.pdf_editor import PdfEditor
+from ui.text_editor import TextEditor
+from ui.scanner_page import ScannerPage
 
 def _img_path(rel):
     base = getattr(sys, '_MEIPASS', os.path.join(os.path.dirname(__file__), '..'))
@@ -31,6 +33,77 @@ logger = logging.getLogger(__name__)
 FUTURE_STYLE = """
     QPushButton { background: #f0f0f0; border-color: #ccc; color: #aaa; }
 """
+
+
+class FlowLayout(QLayout):
+    def __init__(self, parent=None, spacing=20):
+        super().__init__(parent)
+        self._spacing = spacing
+        self._items = []
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(
+            self.geometry().adjusted(0, 0, width - self.geometry().width(), 0),
+            test_only=True,
+        )
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        from PySide6.QtCore import QSize
+        size = QSize(0, 0)
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        from PySide6.QtCore import QSize as QS
+        size += QS(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        from PySide6.QtCore import QRect
+        m = self.contentsMargins()
+        effective = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x = effective.x()
+        y = effective.y()
+        line_height = 0
+        for item in self._items:
+            space_x = self._spacing
+            space_y = self._spacing
+            next_x = x + item.sizeHint().width() + space_x
+            if next_x - space_x > effective.right() + 1 and line_height > 0:
+                x = effective.x()
+                y = y + line_height + space_y
+                next_x = x + item.sizeHint().width() + space_x
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(x, y, item.sizeHint().width(), item.sizeHint().height()))
+            x = next_x
+            line_height = max(line_height, item.sizeHint().height())
+        return y + line_height - rect.y() + m.bottom()
 
 
 def _make_avatar_pixmap(letter, size=48):
@@ -207,7 +280,6 @@ class MainWindow(QMainWindow):
         self._display_name = ""
         self._is_admin = False
         self._subscription_required = True
-        self._search_date_active = False
         self._prev_page_index = 0
         self._stack = QStackedWidget()
         self.setCentralWidget(self._stack)
@@ -227,6 +299,15 @@ class MainWindow(QMainWindow):
         self._pdf_editor.subscription_check = lambda: self._require_subscription()
         self._pdf_editor.go_back.connect(self._switch_to_main)
         self._stack.addWidget(self._pdf_editor)
+        self._text_editor = TextEditor()
+        self._text_editor.subscription_check = lambda: self._require_subscription()
+        self._text_editor.go_back.connect(self._switch_to_main)
+        self._pending_file = None
+        self._stack.addWidget(self._text_editor)
+        self._scanner_page = ScannerPage()
+        self._scanner_page.subscription_check = lambda: self._require_subscription()
+        self._scanner_page.go_back.connect(self._switch_to_main)
+        self._stack.addWidget(self._scanner_page)
         self._login_widget = self._build_login_page()
         self._stack.addWidget(self._login_widget)
         self._register_widget = self._build_register_page()
@@ -255,12 +336,16 @@ class MainWindow(QMainWindow):
         self._notif_timer.setInterval(60000)
         self._notif_timer.timeout.connect(self._on_notif_timer)
 
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(15000)
+        self._refresh_timer.timeout.connect(self._auto_refresh_data)
+
         self._update_banners()
 
         self._notif_timer.start()
+        self._refresh_timer.start()
 
-        if use_api:
-            self._try_restore_session()
+        self._try_restore_session()
 
     def _build_main_screen(self):
         widget = QWidget()
@@ -388,6 +473,16 @@ class MainWindow(QMainWindow):
         btn_future2.setIcon(QIcon(_img_path('i4.jpeg')))
         btn_future2.setIconSize(btn_future2.size())
         _make_card("تحرير PDF", btn_future2, btn_row)
+
+        btn_text = PlusButton("", "كتابة وتحرير النصوص", self.open_text_editor)
+        btn_text.setIcon(QIcon(_img_path('i8.jpeg')))
+        btn_text.setIconSize(btn_text.size())
+        _make_card("محرر النصوص", btn_text, btn_row)
+
+        btn_scanner = PlusButton("", "مسح ضوئي واستيراد صور", self.open_scanner)
+        btn_scanner.setIcon(QIcon(_img_path('i9.jpeg')))
+        btn_scanner.setIconSize(btn_scanner.size())
+        _make_card("سكنر", btn_scanner, btn_row)
 
         center_row.addLayout(btn_row)
 
@@ -686,20 +781,25 @@ class MainWindow(QMainWindow):
         return os.path.join(DATA_DIR, "session.json")
 
     def _save_session(self):
-        from core import api_client
-        token = api_client.get_token()
-        if not token:
-            return
         import json
+        sess_data = {
+            "username": self._username,
+            "display_name": self._display_name,
+            "is_admin": self._is_admin,
+            "subscription_required": self._subscription_required,
+        }
+        if self._use_api:
+            from core import api_client
+            token = api_client.get_token()
+            if not token:
+                return
+            sess_data["token"] = token
+            sess_data["token_id"] = api_client.get_token_id()
+            sess_data["mode"] = "api"
+        else:
+            sess_data["mode"] = "local"
         with open(self._session_path(), "w", encoding="utf-8") as f:
-            json.dump({
-                "token": token,
-                "token_id": api_client.get_token_id(),
-                "username": self._username,
-                "display_name": self._display_name,
-                "is_admin": self._is_admin,
-                "subscription_required": self._subscription_required,
-            }, f)
+            json.dump(sess_data, f)
 
     def _clear_session(self):
         p = self._session_path()
@@ -717,9 +817,27 @@ class MainWindow(QMainWindow):
         except Exception:
             self._clear_session()
             return False
-        token = sess.get("token")
         username = sess.get("username")
-        if not token or not username:
+        if not username:
+            self._clear_session()
+            return False
+        mode = sess.get("mode", "api")
+        if mode == "local" or (not self._use_api):
+            if username not in self._users:
+                self._clear_session()
+                return False
+            self._logged_in = True
+            self._username = username
+            self._display_name = sess.get("display_name", username)
+            self._is_admin = sess.get("is_admin", False)
+            self._subscription_required = bool(sess.get("subscription_required", True))
+            self._update_auth_ui()
+            self._switch_to_main()
+            self._show_subscription_warning()
+            logger.info("استعادة جلسة محلية: %s", username)
+            return True
+        token = sess.get("token")
+        if not token:
             self._clear_session()
             return False
         from core import api_client
@@ -811,6 +929,34 @@ class MainWindow(QMainWindow):
         self._load_notifications()
         logger.info("تحديث بيانات المستخدم: %s", self._username)
 
+    def _auto_refresh_data(self):
+        if not self._logged_in:
+            return
+        if self._use_api:
+            from core.database import api_check_auth
+            qdata, qerr = api_check_auth()
+            if qerr:
+                return
+            if qdata:
+                old_sub = self._subscription_required
+                old_admin = self._is_admin
+                self._api_data = qdata
+                self._display_name = qdata.get("shop_name", self._username)
+                self._is_admin = qdata.get("is_admin", False)
+                self._subscription_required = bool(qdata.get("subscription_required", True))
+                if self._subscription_required != old_sub or self._is_admin != old_admin:
+                    self._update_auth_ui()
+                    self._update_banners()
+                    logger.info("تم تحديث تلقائي للبيانات: %s", self._username)
+            if self._is_admin and self._stack.currentWidget() is self._dashboard_widget:
+                self._refresh_dashboard()
+        else:
+            from core.database import load_users
+            self._users = load_users()
+            if self._is_admin and self._stack.currentWidget() is self._dashboard_widget:
+                self._refresh_dashboard()
+            logger.info("تم تحديث تلقائي للبيانات المحلية")
+
     def _login_submit(self, eng_user, password):
         username = eng_user.text().strip()
         pw = password.text().strip()
@@ -878,6 +1024,7 @@ class MainWindow(QMainWindow):
         self._show_subscription_warning()
         self._check_pending_notifications()
         self._load_notifications()
+        self._save_session()
         logger.info("تسجيل دخول ناجح: %s", username)
 
     def _register_submit(self, fields):
@@ -1247,6 +1394,24 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("ورشة طباعة - تحرير PDF")
         logger.info("فتح محرر PDF")
 
+    def open_text_editor(self):
+        self._require_auth(lambda: self._check_section_access() and self._check_trial("text") and self._open_text_editor())
+
+    def _open_text_editor(self):
+        QMessageBox.information(self, "تحت الصيانة", "محرر النصوص حالياً تحت الصيانة.\nسيتم تشغيله قريباً.")
+
+    def open_file_arg(self, path):
+        self._pending_file = path
+        self.open_text_editor()
+
+    def open_scanner(self):
+        self._require_auth(lambda: self._check_section_access() and self._open_scanner())
+
+    def _open_scanner(self):
+        self._stack.setCurrentWidget(self._scanner_page)
+        self.setWindowTitle("ورشة طباعة - ماسح ضوئي")
+        logger.info("فتح السكنر")
+
     def _build_dashboard_page(self):
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -1275,22 +1440,38 @@ class MainWindow(QMainWindow):
         top.addWidget(home_btn)
         layout.addLayout(top)
 
-        header = QLabel("لوحة تحكم المالك")
+        header = QLabel("الرئيسية")
         header.setAlignment(Qt.AlignCenter)
         header.setStyleSheet("font-size: 24px; font-weight: bold; color: #e67e22; margin-bottom: 10px;")
         layout.addWidget(header)
 
-        self._dashboard_table = QTableWidget()
-        self._dashboard_table.setColumnCount(9)
-        self._dashboard_table.setHorizontalHeaderLabels([
-            "اسم المكتبة", "اسم بالانكليزي", "رقم الهاتف",
-            "تاريخ التسجيل", "تاريخ الاشتراك", "أيام الاشتراك",
-            "الأجهزة", "الحد الأقصى", "إجراءات"
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(15)
+        self._dash_stat_total = self._make_stat_card("إجمالي المستخدمين", "0", "#1a73e8")
+        stats_row.addWidget(self._dash_stat_total)
+        self._dash_stat_today = self._make_stat_card("نشطون اليوم", "0", "#27ae60")
+        stats_row.addWidget(self._dash_stat_today)
+        self._dash_stat_inactive = self._make_stat_card("غير نشطين +30 يوم", "0", "#f39c12")
+        stats_row.addWidget(self._dash_stat_inactive)
+        self._dash_stat_notlogged = self._make_stat_card("لم يسجل دخول اليوم", "0", "#95a5a6")
+        stats_row.addWidget(self._dash_stat_notlogged)
+        layout.addLayout(stats_row)
+
+        self._dash_online_label = QLabel("المتصلون حالياً (0)")
+        self._dash_online_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #333; margin-top: 10px;")
+        layout.addWidget(self._dash_online_label)
+
+        self._dash_online_table = QTableWidget()
+        self._dash_online_table.setColumnCount(4)
+        self._dash_online_table.setHorizontalHeaderLabels([
+            "المستخدم", "اسم المتجر", "الجلسات النشطة", "آخر دخول"
         ])
-        self._dashboard_table.horizontalHeader().setStretchLastSection(True)
-        self._dashboard_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self._dashboard_table.setAlternatingRowColors(True)
-        self._dashboard_table.setStyleSheet("""
+        self._dash_online_table.horizontalHeader().setStretchLastSection(True)
+        self._dash_online_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self._dash_online_table.setAlternatingRowColors(True)
+        self._dash_online_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._dash_online_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._dash_online_table.setStyleSheet("""
             QTableWidget {
                 font-size: 13px; border: 1px solid #ddd; border-radius: 8px;
                 alternate-background-color: #f9f9f9;
@@ -1300,61 +1481,11 @@ class MainWindow(QMainWindow):
                 padding: 6px; border: none;
             }
         """)
-        self._dashboard_table.cellClicked.connect(self._on_dashboard_cell_clicked)
-        layout.addWidget(self._dashboard_table)
+        layout.addWidget(self._dash_online_table)
 
-        search_row = QHBoxLayout()
-        search_row.setSpacing(10)
-
-        self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("🔍 بحث باسم بالانكليزي أو رقم الهاتف...")
-        self._search_input.setStyleSheet("""
-            QLineEdit {
-                font-size: 13px; padding: 8px; border: 2px solid #ddd;
-                border-radius: 6px; min-width: 250px;
-            }
-        """)
-        self._search_input.textChanged.connect(self._apply_dashboard_filter)
-        search_row.addWidget(self._search_input)
-
-        self._date_filter = QDateEdit()
-        self._date_filter.setCalendarPopup(True)
-        self._date_filter.setDate(QDate.currentDate())
-        self._date_filter.setStyleSheet("""
-            QDateEdit {
-                font-size: 13px; padding: 6px; border: 2px solid #ddd;
-                border-radius: 6px;
-            }
-        """)
-        self._date_filter.dateChanged.connect(self._on_date_filter_changed)
-        search_row.addWidget(QLabel("📅 تاريخ:"))
-        search_row.addWidget(self._date_filter)
-
-        clear_date_btn = QPushButton("✕ إلغاء")
-        clear_date_btn.setFixedHeight(30)
-        clear_date_btn.setStyleSheet("""
-            QPushButton {
-                background: #ccc; color: #333; font-size: 12px;
-                border-radius: 6px; border: none; padding: 4px 10px;
-            }
-            QPushButton:hover { background: #bbb; }
-        """)
-        clear_date_btn.clicked.connect(self._clear_date_filter)
-        search_row.addWidget(clear_date_btn)
-
-        layout.addLayout(search_row)
-
-        btn_refresh = QPushButton("🔄 تحديث")
-        btn_refresh.setStyleSheet("""
-            QPushButton {
-                background: #e67e22; color: white; font-size: 14px;
-                padding: 8px 25px; border-radius: 6px; border: none;
-                font-weight: bold;
-            }
-            QPushButton:hover { background: #d35400; }
-        """)
-        btn_refresh.clicked.connect(self._refresh_dashboard)
-        layout.addWidget(btn_refresh, 0, Qt.AlignCenter)
+        admin_notif_row = QHBoxLayout()
+        admin_notif_row.setAlignment(Qt.AlignCenter)
+        admin_notif_row.setSpacing(12)
 
         btn_settings = QPushButton("⚙️ إعدادات واتساب")
         btn_settings.setStyleSheet("""
@@ -1366,17 +1497,13 @@ class MainWindow(QMainWindow):
             QPushButton:hover { background: #7d3c98; }
         """)
         btn_settings.clicked.connect(self._open_notifier_settings)
-        layout.addWidget(btn_settings, 0, Qt.AlignCenter)
+        admin_notif_row.addWidget(btn_settings)
 
         self._sub_toggle_btn = QPushButton()
         self._sub_toggle_btn.setCheckable(True)
         self._sub_toggle_btn.clicked.connect(self._toggle_subscription_required)
-        layout.addWidget(self._sub_toggle_btn, 0, Qt.AlignCenter)
+        admin_notif_row.addWidget(self._sub_toggle_btn)
         self._update_sub_toggle_btn()
-
-        admin_notif_row = QHBoxLayout()
-        admin_notif_row.setAlignment(Qt.AlignCenter)
-        admin_notif_row.setSpacing(12)
 
         btn_send_notif = QPushButton("📢 إرسال اشعار")
         btn_send_notif.setStyleSheet("""
@@ -1404,7 +1531,7 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(admin_notif_row)
 
-        btn_user_stats = QPushButton("👥 إحصائيات المستخدمين")
+        btn_user_stats = QPushButton("👥 إدارة المستخدمين")
         btn_user_stats.setStyleSheet("""
             QPushButton {
                 background: #1a73e8; color: white; font-size: 14px;
@@ -2147,30 +2274,44 @@ class MainWindow(QMainWindow):
         top.addStretch()
         layout.addLayout(top)
 
-        header = QLabel("إحصائيات المستخدمين")
+        header = QLabel("المستخدمين")
         header.setAlignment(Qt.AlignCenter)
         header.setStyleSheet("font-size: 22px; font-weight: bold; color: #e67e22; margin-bottom: 10px;")
         layout.addWidget(header)
 
-        stats_row = QHBoxLayout()
-        stats_row.setSpacing(15)
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(10)
 
-        self._stat_total = self._make_stat_card("إجمالي المستخدمين", "0", "#1a73e8")
-        stats_row.addWidget(self._stat_total)
-        self._stat_today = self._make_stat_card("مستخدمين اليوم", "0", "#27ae60")
-        stats_row.addWidget(self._stat_today)
-        self._stat_inactive = self._make_stat_card("غير نشطين (+30 يوم)", "0", "#e74c3c")
-        stats_row.addWidget(self._stat_inactive)
-        self._stat_never = self._make_stat_card("لم يسجلوا دخول", "0", "#95a5a6")
-        stats_row.addWidget(self._stat_never)
+        self._us_search = QLineEdit()
+        self._us_search.setPlaceholderText("🔍 بحث بالاسم أو المتجر أو الهاتف...")
+        self._us_search.setStyleSheet("""
+            QLineEdit {
+                font-size: 13px; padding: 8px; border: 2px solid #ddd;
+                border-radius: 6px; min-width: 250px;
+            }
+        """)
+        self._us_search.textChanged.connect(self._refresh_user_stats)
+        filter_row.addWidget(self._us_search)
 
-        layout.addLayout(stats_row)
+        self._us_status_filter = QComboBox()
+        self._us_status_filter.addItems(["الكل", "متصل", "سجل اليوم", "غير متصل", "غير نشط 20+ يوم", "لم يسجل دخول"])
+        self._us_status_filter.setStyleSheet("""
+            QComboBox {
+                font-size: 13px; padding: 8px; border: 2px solid #ddd;
+                border-radius: 6px; min-width: 150px;
+            }
+        """)
+        self._us_status_filter.currentIndexChanged.connect(self._refresh_user_stats)
+        filter_row.addWidget(self._us_status_filter)
+
+        filter_row.addStretch()
+        layout.addLayout(filter_row)
 
         self._user_stats_table = QTableWidget()
-        self._user_stats_table.setColumnCount(6)
+        self._user_stats_table.setColumnCount(9)
         self._user_stats_table.setHorizontalHeaderLabels([
-            "اسم المكتبة", "اسم المستخدم", "رقم الهاتف",
-            "آخر دخول", "الاشتراك", "الحالة"
+            "المستخدم", "المتجر", "الهاتف", "تاريخ الانضمام",
+            "الحالة", "الجلسات", "الأجهزة", "المتبقي", "إجراءات"
         ])
         self._user_stats_table.horizontalHeader().setStretchLastSection(True)
         self._user_stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -2189,18 +2330,6 @@ class MainWindow(QMainWindow):
         """)
         self._user_stats_table.cellClicked.connect(self._on_user_stats_cell_clicked)
         layout.addWidget(self._user_stats_table)
-
-        refresh_btn = QPushButton("🔄 تحديث")
-        refresh_btn.setStyleSheet("""
-            QPushButton {
-                background: #e67e22; color: white; font-size: 14px;
-                padding: 8px 25px; border-radius: 6px; border: none;
-                font-weight: bold;
-            }
-            QPushButton:hover { background: #d35400; }
-        """)
-        refresh_btn.clicked.connect(self._refresh_user_stats)
-        layout.addWidget(refresh_btn, 0, Qt.AlignCenter)
 
         widget.setObjectName("userStatsPage")
         widget.setStyleSheet("#userStatsPage { background: #cceeff; }")
@@ -2237,40 +2366,46 @@ class MainWindow(QMainWindow):
     def _open_user_stats_page(self):
         self._prev_page_index = self._stack.currentIndex()
         self._stack.setCurrentWidget(self._user_stats_widget)
-        self.setWindowTitle("ورشة طباعة - إحصائيات المستخدمين")
+        self.setWindowTitle("ورشة طباعة - المستخدمين")
         self._refresh_user_stats()
-        logger.info("فتح صفحة إحصائيات المستخدمين")
+        logger.info("فتح صفحة المستخدمين")
 
     def _user_stats_back(self):
         self._stack.setCurrentIndex(self._prev_page_index)
-        self.setWindowTitle("ورشة طباعة - لوحة تحكم المالك")
-        logger.info("رجوع من صفحة إحصائيات المستخدمين")
+        self.setWindowTitle("ورشة طباعة - الرئيسية")
+        logger.info("رجوع من صفحة المستخدمين")
+
+    @staticmethod
+    def _get_user_status(u):
+        today = date.today().isoformat()
+        if u.get("active_sessions", 0) > 0:
+            return "online"
+        last_login = u.get("last_login", "") or ""
+        if last_login.startswith(today):
+            return "today"
+        if not last_login:
+            return "never"
+        try:
+            days_since = (date.today() - date.fromisoformat(last_login[:10])).days
+        except Exception:
+            days_since = 0
+        if days_since > 20:
+            return "inactive"
+        return "offline"
 
     def _refresh_user_stats(self):
         self._user_stats_table.setRowCount(0)
         if self._use_api:
-            from core.database import api_get_admin_user_stats, api_get_admin_all_users
-            stats, err = api_get_admin_user_stats()
+            from core.database import api_get_admin_all_users
+            users, err = api_get_admin_all_users()
             if err:
-                QMessageBox.warning(self, "خطأ", err)
-                return
-            self._update_stat_card(self._stat_total, stats.get("total_users", 0))
-            self._update_stat_card(self._stat_today, stats.get("today_active", 0))
-            self._update_stat_card(self._stat_inactive, stats.get("inactive_30d", 0))
-            self._update_stat_card(self._stat_never, stats.get("never_active", 0))
-            users, err2 = api_get_admin_all_users()
-            if err2:
-                QMessageBox.warning(self, "خطأ", err2)
-                return
+                users = []
         else:
-            self._update_stat_card(self._stat_total, len([u for u in self._users if u != "ahmed"]))
-            self._update_stat_card(self._stat_today, "-")
-            self._update_stat_card(self._stat_inactive, "-")
-            self._update_stat_card(self._stat_never, "-")
             users = []
             for uname, udata in self._users.items():
                 if uname == "ahmed":
                     continue
+                remaining = self._compute_subscription_days(username=uname)
                 users.append({
                     "username": uname,
                     "shop_name": udata.get("shop_name", ""),
@@ -2278,30 +2413,86 @@ class MainWindow(QMainWindow):
                     "reg_date": udata.get("reg_date", ""),
                     "last_login": "",
                     "active_sessions": 0,
-                    "last_sub_end": "",
-                    "status": "active",
+                    "max_devices": 1,
+                    "remaining_days": remaining,
+                    "status": "active" if remaining > 0 else "inactive",
                 })
-        status_labels = {"active": "نشط", "inactive": "غير نشط", "never_active": "لم يسجل دخول"}
-        status_colors = {"active": "#27ae60", "inactive": "#e74c3c", "never_active": "#95a5a6"}
-        for i, u in enumerate(users):
+
+        search = self._us_search.text().strip().lower() if hasattr(self, "_us_search") else ""
+        status_idx = self._us_status_filter.currentIndex() if hasattr(self, "_us_status_filter") else 0
+        status_map = {0: "all", 1: "online", 2: "today", 3: "offline", 4: "inactive", 5: "never"}
+        status_filter = status_map.get(status_idx, "all")
+
+        status_labels = {
+            "online": "متصل", "today": "سجل اليوم", "offline": "غير متصل",
+            "inactive": "غير نشط 20+ يوم", "never": "لم يسجل دخول",
+        }
+        status_colors = {
+            "online": "#27ae60", "today": "#1a73e8", "offline": "#f39c12",
+            "inactive": "#e74c3c", "never": "#95a5a6",
+        }
+
+        filtered = []
+        for u in users:
+            match_search = (not search or search in (u.get("username", "")).lower()
+                            or search in (u.get("shop_name", "") or "").lower()
+                            or search in (u.get("phone", "") or "").lower())
+            if not match_search:
+                continue
+            user_status = self._get_user_status(u)
+            if status_filter != "all" and user_status != status_filter:
+                continue
+            filtered.append((u, user_status))
+
+        for i, (u, user_status) in enumerate(filtered):
             self._user_stats_table.insertRow(i)
-            self._user_stats_table.setItem(i, 0, QTableWidgetItem(u.get("shop_name", "")))
-            self._user_stats_table.setItem(i, 1, QTableWidgetItem(u.get("username", "")))
+            self._user_stats_table.setItem(i, 0, QTableWidgetItem(u.get("username", "")))
+            self._user_stats_table.setItem(i, 1, QTableWidgetItem(u.get("shop_name", "")))
             self._user_stats_table.setItem(i, 2, QTableWidgetItem(u.get("phone", "")))
-            last_login = u.get("last_login", "")
-            if len(last_login) >= 16:
-                last_login = last_login[:16].replace("T", " ")
-            self._user_stats_table.setItem(i, 3, QTableWidgetItem(last_login if last_login else "—"))
-            sub_end = u.get("last_sub_end", "")
-            self._user_stats_table.setItem(i, 4, QTableWidgetItem(sub_end if sub_end else "بدون اشتراك"))
-            status = u.get("status", "active")
-            status_item = QTableWidgetItem(status_labels.get(status, status))
-            status_item.setForeground(QColor(status_colors.get(status, "#333")))
-            self._user_stats_table.setItem(i, 5, status_item)
-        logger.info("تحديث صفحة إحصائيات المستخدمين: %d مستخدم", self._user_stats_table.rowCount())
+            reg_date = u.get("reg_date", "")
+            self._user_stats_table.setItem(i, 3, QTableWidgetItem(reg_date if reg_date else "—"))
+            status_item = QTableWidgetItem(status_labels.get(user_status, user_status))
+            status_item.setForeground(QColor(status_colors.get(user_status, "#333")))
+            self._user_stats_table.setItem(i, 4, status_item)
+            active = u.get("active_sessions", 0)
+            sessions_item = QTableWidgetItem(str(active))
+            if active > 0:
+                sessions_item.setForeground(QColor("#27ae60"))
+            self._user_stats_table.setItem(i, 5, sessions_item)
+            max_dev = u.get("max_devices", 1)
+            self._user_stats_table.setItem(i, 6, QTableWidgetItem(str(max_dev)))
+            remaining = u.get("remaining_days", 0)
+            if remaining > 0:
+                rem_item = QTableWidgetItem(f"{remaining} يوم")
+                rem_item.setForeground(QColor("#27ae60"))
+            else:
+                rem_item = QTableWidgetItem("منتهي")
+                rem_item.setForeground(QColor("#e74c3c"))
+            self._user_stats_table.setItem(i, 7, rem_item)
+
+            actions_widget = QWidget()
+            actions_layout = QHBoxLayout(actions_widget)
+            actions_layout.setContentsMargins(2, 2, 2, 2)
+            actions_layout.setSpacing(4)
+
+            btn_details = QPushButton("تفاصيل")
+            btn_details.setStyleSheet("QPushButton { background: #3498db; color: white; border-radius: 4px; font-size: 11px; padding: 3px 8px; border: none; } QPushButton:hover { background: #2980b9; }")
+            btn_details.clicked.connect(lambda checked, uname=u.get("username", ""): self._show_user_stats_detail_dialog(uname))
+            actions_layout.addWidget(btn_details)
+
+            btn_delete = QPushButton("حذف")
+            btn_delete.setStyleSheet("QPushButton { background: #e74c3c; color: white; border-radius: 4px; font-size: 11px; padding: 3px 8px; border: none; } QPushButton:hover { background: #c0392b; }")
+            btn_delete.clicked.connect(lambda checked, uname=u.get("username", ""): self._dashboard_delete_user(uname))
+            actions_layout.addWidget(btn_delete)
+
+            self._user_stats_table.setCellWidget(i, 8, actions_widget)
+
+        logger.info("تحديث صفحة المستخدمين: %d مستخدم", self._user_stats_table.rowCount())
 
     def _on_user_stats_cell_clicked(self, row, col):
-        item = self._user_stats_table.item(row, 1)
+        if col == 8:
+            return
+        item = self._user_stats_table.item(row, 0)
         if item:
             username = item.text()
             self._show_user_stats_detail_dialog(username)
@@ -2451,114 +2642,62 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _refresh_dashboard(self, search_text="", filter_date=None):
-        self._dashboard_table.setRowCount(0)
+        self._dash_online_table.setRowCount(0)
         if self._use_api:
-            from core.database import api_get_users
-            users_data, err = api_get_users()
+            from core.database import api_get_admin_all_users
+            users_data, err = api_get_admin_all_users()
             if err:
-                logger.error("فشل تحميل لوحة التحكم: %s", err)
-                return
-            users_list = [(u["username"], u) for u in users_data]
+                users_data = []
+            users = users_data or []
         else:
-            users_list = [(eng_name, user) for eng_name, user in self._users.items() if not user.get("is_admin")]
-        if search_text:
-            st = search_text.lower()
-            users_list = [(e, u) for e, u in users_list
-                          if st in e.lower() or st in u.get("phone", "").lower()]
-        if filter_date is not None:
-            fd = filter_date.strftime("%Y-%m-%d")
-            users_list = [(e, u) for e, u in users_list if u.get("reg_date", "") == fd]
-        logger.info("تحديث لوحة التحكم: %d مستخدم من %d إجمالي", len(users_list), len(users_list))
-        for i, (eng_name, user) in enumerate(sorted(users_list, key=lambda x: x[1].get("reg_date", ""))):
-            self._dashboard_table.insertRow(i)
-            self._dashboard_table.setItem(i, 0, QTableWidgetItem(user.get("shop_name", "")))
-            self._dashboard_table.setItem(i, 1, QTableWidgetItem(eng_name))
-            self._dashboard_table.setItem(i, 2, QTableWidgetItem(user.get("phone", "")))
-            self._dashboard_table.setItem(i, 3, QTableWidgetItem(user.get("reg_date", "")))
-            for col in range(4):
-                self._dashboard_table.item(i, col).setForeground(QColor("#333"))
-            if self._use_api:
-                remaining = user.get("remaining_days", 0)
-                sub_date = user.get("latest_sub_start", "بدون اشتراك")
-            else:
-                remaining = self._compute_subscription_days(username=eng_name)
-                subs = user.get("subscriptions", [])
-                latest_sub = subs[-1] if subs else None
-                sub_date = latest_sub["start"] if latest_sub else "بدون اشتراك"
-            self._dashboard_table.setItem(i, 4, QTableWidgetItem(sub_date))
-            self._dashboard_table.item(i, 4).setForeground(QColor("#333"))
-            self._dashboard_table.setItem(i, 5, QTableWidgetItem(str(remaining)))
-            self._dashboard_table.item(i, 5).setForeground(QColor("#333"))
+            users = []
+            for uname, udata in self._users.items():
+                if uname == "ahmed":
+                    continue
+                remaining = self._compute_subscription_days(username=uname)
+                users.append({
+                    "username": uname,
+                    "shop_name": udata.get("shop_name", ""),
+                    "phone": udata.get("phone", ""),
+                    "reg_date": udata.get("reg_date", ""),
+                    "last_login": "",
+                    "active_sessions": 0,
+                    "max_devices": 1,
+                    "remaining_days": remaining,
+                    "status": "active" if remaining > 0 else "inactive",
+                })
 
-            if self._use_api:
-                active = user.get("active_sessions", 0)
-                max_dev = user.get("max_devices", 1)
-            else:
-                active = 0
-                max_dev = 1
-            sessions_item = QTableWidgetItem(f"{active}/{max_dev}")
-            sessions_item.setForeground(QColor("#333"))
-            sessions_item.setToolTip("اضغط لتغيير الحد الأقصى للأجهزة" if self._use_api else "")
-            self._dashboard_table.setItem(i, 6, sessions_item)
+        today = date.today().isoformat()
+        today_active = sum(1 for u in users if (u.get("last_login", "").startswith(today) or u.get("active_sessions", 0) > 0))
+        inactive_30d = sum(1 for u in users if u.get("status") == "inactive")
+        not_logged_today = sum(1 for u in users if not (u.get("last_login", "").startswith(today)) and u.get("active_sessions", 0) == 0)
 
-            max_dev_item = QTableWidgetItem(str(max_dev))
-            max_dev_item.setForeground(QColor("#333"))
-            self._dashboard_table.setItem(i, 7, max_dev_item)
+        self._update_stat_card(self._dash_stat_total, len(users))
+        self._update_stat_card(self._dash_stat_today, today_active)
+        self._update_stat_card(self._dash_stat_inactive, inactive_30d)
+        self._update_stat_card(self._dash_stat_notlogged, not_logged_today)
 
-            actions_widget = QWidget()
-            actions_layout = QHBoxLayout(actions_widget)
-            actions_layout.setContentsMargins(2, 2, 2, 2)
-            actions_layout.setSpacing(4)
+        online_users = [u for u in users if u.get("active_sessions", 0) > 0]
+        self._dash_online_label.setText(f"المتصلون حالياً ({len(online_users)})")
 
-            btn_reset = QPushButton("🔑")
-            btn_reset.setToolTip("استعادة الرقم السري")
-            btn_reset.setFixedSize(28, 28)
-            btn_reset.setStyleSheet("QPushButton { background: #3498db; color: white; border-radius: 14px; font-size: 12px; } QPushButton:hover { background: #2980b9; }")
-            btn_reset.clicked.connect(lambda checked, e=eng_name: self._dashboard_reset_password(e))
-            actions_layout.addWidget(btn_reset)
-
-            btn_add_days = QPushButton("➕")
-            btn_add_days.setToolTip("زيادة أيام الاشتراك")
-            btn_add_days.setFixedSize(28, 28)
-            btn_add_days.setStyleSheet("QPushButton { background: #27ae60; color: white; border-radius: 14px; font-size: 12px; } QPushButton:hover { background: #219a52; }")
-            btn_add_days.clicked.connect(lambda checked, e=eng_name: self._dashboard_add_days(e))
-            actions_layout.addWidget(btn_add_days)
-
-            btn_delete = QPushButton("✕")
-            btn_delete.setToolTip("حذف الحساب")
-            btn_delete.setFixedSize(28, 28)
-            btn_delete.setStyleSheet("QPushButton { background: #e74c3c; color: white; border-radius: 14px; font-size: 12px; } QPushButton:hover { background: #c0392b; }")
-            btn_delete.clicked.connect(lambda checked, e=eng_name: self._dashboard_delete_user(e))
-            actions_layout.addWidget(btn_delete)
-
-            self._dashboard_table.setCellWidget(i, 8, actions_widget)
-        logger.info("تحديث لوحة التحكم: %d مستخدم", self._dashboard_table.rowCount())
-
-    def _apply_dashboard_filter(self):
-        search = self._search_input.text().strip()
-        if self._search_date_active:
-            qd = self._date_filter.date()
-            fd = date(qd.year(), qd.month(), qd.day())
-        else:
-            fd = None
-        self._refresh_dashboard(search_text=search, filter_date=fd)
-
-    def _clear_date_filter(self):
-        self._search_date_active = False
-        self._apply_dashboard_filter()
-
-    def _on_date_filter_changed(self):
-        self._search_date_active = True
-        self._apply_dashboard_filter()
+        for i, u in enumerate(online_users):
+            self._dash_online_table.insertRow(i)
+            self._dash_online_table.setItem(i, 0, QTableWidgetItem(u.get("username", "")))
+            self._dash_online_table.setItem(i, 1, QTableWidgetItem(u.get("shop_name", "")))
+            sessions_item = QTableWidgetItem(str(u.get("active_sessions", 0)))
+            sessions_item.setForeground(QColor("#27ae60"))
+            self._dash_online_table.setItem(i, 2, sessions_item)
+            last_login = u.get("last_login", "")
+            if len(last_login) >= 16:
+                last_login = last_login[:16].replace("T", " ")
+            self._dash_online_table.setItem(i, 3, QTableWidgetItem(last_login if last_login else "—"))
+        logger.info("تحديث لوحة التحكم: %d مستخدم، %d متصل", len(users), len(online_users))
 
     def _open_dashboard(self):
         self._prev_page_index = self._stack.currentIndex()
-        self._search_date_active = False
-        self._search_input.clear()
-        self._date_filter.setDate(QDate.currentDate())
         self._refresh_dashboard()
         self._stack.setCurrentWidget(self._dashboard_widget)
-        self.setWindowTitle("ورشة طباعة - لوحة تحكم المالك")
+        self.setWindowTitle("ورشة طباعة - الرئيسية")
         logger.info("فتح لوحة تحكم المالك، الصفحة السابقة: %d", self._prev_page_index)
 
     def _dashboard_back(self):
@@ -2676,18 +2815,6 @@ class MainWindow(QMainWindow):
             self._users.pop(eng_name, None)
         self._refresh_dashboard()
         logger.info("تم حذف المستخدم %s", eng_name)
-
-    def _on_dashboard_cell_clicked(self, row, col):
-        if col == 1:
-            item = self._dashboard_table.item(row, col)
-            if item:
-                eng_name = item.text()
-                self._show_subscription_history_dialog(eng_name)
-        elif col == 6 and self._use_api:
-            item = self._dashboard_table.item(row, col)
-            if item:
-                eng_name = self._dashboard_table.item(row, 1).text()
-                self._dashboard_set_max_devices(eng_name)
 
     def _show_subscription_history_dialog(self, username):
         today = date.today()

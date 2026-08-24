@@ -54,7 +54,7 @@ from PIL import Image
 
 
 
-from core.printer import print_scene, get_selected_printer_name, set_printer_name
+from core.printer import print_scene, get_selected_printer_name, set_printer_name, PAPER_TYPES, PAPER_TYPE_NAMES, get_last_paper_type, set_last_paper_type
 
 
 
@@ -366,7 +366,7 @@ class PrintSetupDialog(QDialog):
 
 
 
-    def __init__(self, parent=None, page_count=1):
+    def __init__(self, parent=None, page_count=1, default_paper_type=None):
 
 
 
@@ -439,6 +439,24 @@ class PrintSetupDialog(QDialog):
 
 
         layout.addLayout(printer_row)
+
+        paper_row = QHBoxLayout()
+
+        paper_row.addWidget(QLabel("نوع الورق:"))
+
+        self.paper_combo = QComboBox()
+
+        self.paper_combo.addItems(PAPER_TYPE_NAMES)
+
+        default_pt = default_paper_type or get_last_paper_type()
+
+        if default_pt and default_pt in PAPER_TYPE_NAMES:
+
+            self.paper_combo.setCurrentText(default_pt)
+
+        paper_row.addWidget(self.paper_combo)
+
+        layout.addLayout(paper_row)
 
 
 
@@ -656,17 +674,15 @@ class PrintSetupDialog(QDialog):
 
     def page_range(self):
 
-
-
         if self.all_pages_cb.isChecked():
-
-
 
             return None
 
-
-
         return (self.from_spin.value(), self.to_spin.value())
+
+    def paper_type(self):
+
+        return self.paper_combo.currentText()
 
 
 
@@ -2413,6 +2429,45 @@ class A4Editor(QWidget):
             self._swap_cards(item, best)
 
 
+        else:
+
+            self._snap_card_to_nearest(item, center)
+
+    def _snap_card_to_nearest(self, item, center):
+
+        drop_page = int(center.y() // A4_H)
+
+        best_idx = 0
+
+        best_dist = float('inf')
+
+        total_slots = MAX_CARDS * self._num_pages
+
+        for i in range(total_slots):
+
+            gx, gy = self._grid_pos(i)
+
+            card_page = int(gy // A4_H)
+
+            if card_page != drop_page:
+
+                continue
+
+            dx = center.x() - (gx + CARD_W / 2)
+
+            dy = center.y() - (gy + CARD_H / 2)
+
+            d = dx * dx + dy * dy
+
+            if d < best_dist:
+
+                best_dist = d
+
+                best_idx = i
+
+        item.setPos(*self._grid_pos(best_idx))
+
+
 
 
 
@@ -2422,21 +2477,17 @@ class A4Editor(QWidget):
 
 
 
+        pos_a = a.pos()
+
+        pos_b = b.pos()
+
+        a.setPos(pos_b)
+
+        b.setPos(pos_a)
+
         i = self.cards.index(a)
 
-
-
         j = self.cards.index(b)
-
-
-
-        a.setPos(*self._grid_pos(j))
-
-
-
-        b.setPos(*self._grid_pos(i))
-
-
 
         self.cards[i], self.cards[j] = self.cards[j], self.cards[i]
 
@@ -2502,7 +2553,7 @@ class A4Editor(QWidget):
 
 
 
-            dialog = PrintSetupDialog(self, page_count=self._num_pages)
+            dialog = PrintSetupDialog(self, page_count=self._num_pages, default_paper_type="ورق عادي")
 
 
 
@@ -2563,14 +2614,13 @@ class A4Editor(QWidget):
 
 
                 it.setVisible(False)
-
-
-
+            pt = dialog.paper_type()
+            if pt:
+                set_last_paper_type(pt)
             print_scene(self, self.scene, copies=copies, page_count=self._num_pages, duplex=duplex,
+                        page_range=dialog.page_range(), paper_type=pt)
 
 
-
-                        page_range=dialog.page_range())
 
 
 

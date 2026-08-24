@@ -7,3 +7,7 @@ dist/
 *.spec
 .vs/
 *.log
+*.pdf
+*.wwk
+test_conversion.py
+app.db

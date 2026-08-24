@@ -40,6 +40,33 @@ def _icon_path():
     return os.path.join(_frozen_path(), "i1.ico")
 
 
+def _register_wwk_extension():
+    if os.name != "nt":
+        return
+    try:
+        import winreg
+        exe = sys.executable if getattr(sys, "frozen", False) else f'"{sys.executable}" "{os.path.join(os.path.dirname(__file__), "main.py")}"'
+        icon = _icon_path()
+        key_path = r"Software\Classes\.wwk"
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "WorshaFile")
+        key_path = r"Software\Classes\WorshaFile"
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "ملف ورشة طباعة")
+        key_path = r"Software\Classes\WorshaFile\DefaultIcon"
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, icon)
+        key_path = r"Software\Classes\WorshaFile\shell\open\command"
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f'{exe} "%1"')
+        key_path = r"Software\Classes\.wwk\OpenWithProgids"
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, "WorshaFile", 0, winreg.REG_NONE, b"")
+        logging.info("تم تسجيل امتداد .wwk")
+    except Exception as e:
+        logging.warning("فشل تسجيل امتداد .wwk: %s", e)
+
+
 def main():
     frozen = getattr(sys, "frozen", False)
     if frozen:
@@ -54,6 +81,7 @@ def main():
         from core import api_client
         api_client.set_server_url(server_url)
         logging.info("API mode enabled: %s", server_url)
+    _register_wwk_extension()
     app = QApplication(sys.argv)
     app.setApplicationName("ورشة طباعة")
     icon = QIcon(_icon_path())
@@ -61,6 +89,13 @@ def main():
         app.setWindowIcon(icon)
     window = IDCardApp(use_api=use_api)
     window.show()
+    file_arg = None
+    for arg in sys.argv[1:]:
+        if os.path.isfile(arg) and arg.lower().endswith(".wwk"):
+            file_arg = arg
+            break
+    if file_arg:
+        window.open_file_arg(file_arg)
     sys.exit(app.exec())
 
 

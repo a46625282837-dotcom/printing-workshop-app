@@ -1105,17 +1105,20 @@ class PdfEditor(QWidget):
         if not getattr(self, 'subscription_check', lambda: True)():
             return
         from ui.a4_editor import PrintSetupDialog
-        from core.printer import print_scene, set_printer_name
-        dlg = PrintSetupDialog(self, page_count=self._num_pages)
+        from core.printer import print_scene, set_printer_name, set_last_paper_type
+        dlg = PrintSetupDialog(self, page_count=self._num_pages, default_paper_type="ورق عادي")
         if dlg.exec() != QDialog.Accepted:
             return
         printer_name = dlg.selected_printer()
         if printer_name:
             set_printer_name(printer_name)
+        pt = dlg.paper_type()
+        if pt:
+            set_last_paper_type(pt)
         logger.info("طباعة %d صفحة", self._num_pages)
         print_scene(self, self.scene, copies=dlg.copies(),
                     page_count=self._num_pages, duplex=dlg.duplex(),
-                    page_range=dlg.page_range())
+                    page_range=dlg.page_range(), paper_type=pt)
 
     def _save_as_pdf(self):
         if not self._num_pages:
