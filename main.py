@@ -67,6 +67,39 @@ def _register_wwk_extension():
         logging.warning("فشل تسجيل امتداد .wwk: %s", e)
 
 
+APP_VERSION = "1.3.6"
+_GITHUB_REPO = "a46625282837-dotcom/printing-workshop-app"
+
+
+def _check_for_update():
+    try:
+        import urllib.request
+        url = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
+        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github.v3+json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+            tag = data.get("tag_name", "").lstrip("v")
+            if tag and tag != APP_VERSION:
+                return {"version": tag, "url": data.get("html_url", ""), "notes": data.get("body", "")}
+    except Exception as e:
+        logging.debug("Update check failed: %s", e)
+    return None
+
+
+def _notify_update(update_info):
+    from PySide6.QtWidgets import QMessageBox
+    msg = QMessageBox()
+    msg.setWindowTitle("تحديث جديد متاح")
+    msg.setIcon(QMessageBox.Information)
+    msg.setText(f"גרסה {update_info['version']} متاحة!")
+    msg.setInformativeText(f"الإصدار الحالي: {APP_VERSION}\nالإصدار الجديد: {update_info['version']}\n\nهل تريد التحميل؟")
+    msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+    msg.setDefaultButton(QMessageBox.Yes)
+    if msg.exec() == QMessageBox.Yes:
+        import webbrowser
+        webbrowser.open(update_info["url"])
+
+
 def main():
     frozen = getattr(sys, "frozen", False)
     if frozen:
@@ -89,6 +122,10 @@ def main():
         app.setWindowIcon(icon)
     window = IDCardApp(use_api=use_api)
     window.show()
+    if frozen:
+        update = _check_for_update()
+        if update:
+            _notify_update(update)
     file_arg = None
     for arg in sys.argv[1:]:
         if os.path.isfile(arg) and arg.lower().endswith(".wwk"):
