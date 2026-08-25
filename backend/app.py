@@ -81,7 +81,7 @@ def _update_last_seen():
         pass
 
 
-_DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://www.mediafire.com/file/htutjgztxmk893m/%D9%88%D8%B1%D8%B4%D8%A9+%D8%B7%D8%A8%D8%A7%D8%B9%D8%A9.exe/file")
+_DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://a46625282837-dotcom.github.io/worsha-download/")
 
 _APP_VERSION = os.environ.get("APP_VERSION", "1.3.5")
 
