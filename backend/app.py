@@ -3,6 +3,7 @@ import base64
 import uuid
 from datetime import date, timedelta
 from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
 import os
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, get_jwt_identity,
@@ -32,6 +33,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+CORS(app)
 app.config["JWT_SECRET_KEY"] = config.JWT_SECRET
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=config.JWT_EXPIRY_HOURS)
 jwt = JWTManager(app)
