@@ -159,6 +159,7 @@ def api_login():
     token_id = str(uuid.uuid4())
     add_session(username, token_id)
     update_last_login(username)
+    update_last_seen(username)
     token = create_access_token(identity=username, additional_claims={"tid": token_id})
     return jsonify({
         "token": token,
@@ -198,6 +199,7 @@ def api_register():
         token_id = str(uuid.uuid4())
         update_token_id(username, token_id)
         add_session(username, token_id)
+        update_last_seen(username)
         token = create_access_token(identity=username, additional_claims={"tid": token_id})
         return jsonify({"token": token, "username": username}), 201
     return jsonify({"error": "اسم المستخدم موجود مسبقاً"}), 409
@@ -207,6 +209,7 @@ def api_register():
 @jwt_required()
 def api_check():
     username = get_jwt_identity()
+    update_last_seen(username)
     user = get_user(username)
     if not user:
         return jsonify({"error": "المستخدم غير موجود"}), 404
