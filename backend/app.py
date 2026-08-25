@@ -18,7 +18,7 @@ from .database import (
     get_pending_messages, add_pending_message, clear_pending,
     save_profile_pixmap, get_profile_pixmap,
     save_banner_pixmap, get_banner_pixmaps, delete_banner_pixmap,
-    update_token_id, update_last_login, get_active_session_count, add_session, remove_session,
+    update_token_id, update_last_login, update_last_seen, get_active_session_count, add_session, remove_session,
     remove_all_sessions, remove_expired_sessions, remove_all_expired_sessions,
     update_max_devices, get_max_devices, get_user_sessions,
     get_subscription_required, set_subscription_required,
@@ -67,6 +67,18 @@ def _token_expired(jwt_header, jwt_payload):
 
 
 init_db()
+
+
+@app.before_request
+def _update_last_seen():
+    try:
+        from flask_jwt_extended import verify_jwt_in_request
+        verify_jwt_in_request(optional=True)
+        username = get_jwt_identity()
+        if username:
+            update_last_seen(username)
+    except Exception:
+        pass
 
 
 _DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://www.mediafire.com/file/htutjgztxmk893m/%D9%88%D8%B1%D8%B4%D8%A9+%D8%B7%D8%A8%D8%A7%D8%B9%D8%A9.exe/file")

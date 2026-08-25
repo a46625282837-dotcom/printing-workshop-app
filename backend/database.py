@@ -142,8 +142,9 @@ def init_db():
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS token_id TEXT DEFAULT ''")
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS max_devices INTEGER DEFAULT 1")
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TEXT DEFAULT ''")
         else:
-            for col, default in [("token_id", "''"), ("max_devices", "1"), ("last_login", "''")]:
+            for col, default in [("token_id", "''"), ("max_devices", "1"), ("last_login", "''"), ("last_seen", "''")]:
                 try:
                     cur.execute(f"ALTER TABLE users ADD COLUMN {col} DEFAULT {default}")
                 except Exception:
@@ -208,6 +209,16 @@ def update_last_login(username):
     conn.close()
 
 
+def update_last_seen(username):
+    conn = _conn()
+    cur = conn.cursor()
+    cur.execute(_q("UPDATE users SET last_seen = %s WHERE username = %s"),
+                (datetime.utcnow().isoformat(), username))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
 def get_admin_user_stats():
     conn = _conn()
     cur = conn.cursor()
@@ -239,26 +250,30 @@ def get_all_users_with_activity():
     conn = _conn()
     cur = conn.cursor()
     thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
-    one_hour_ago = (datetime.utcnow() - timedelta(hours=1)).isoformat()
+    today = date.today().isoformat()
     cur.execute(_q("""
         SELECT u.username, u.shop_name, u.phone, u.reg_date, u.is_admin, u.max_devices,
-               u.last_login,
-               (SELECT COUNT(*) FROM user_sessions s WHERE s.username = u.username AND s.created_at > %s) AS active_sessions,
+               u.last_login, u.last_seen,
                (SELECT end_date FROM subscriptions sub WHERE sub.username = u.username ORDER BY sub.end_date DESC LIMIT 1) AS last_sub_end
         FROM users u WHERE u.is_admin != 1 ORDER BY u.reg_date
-    """), (one_hour_ago,))
+    """))
     rows = cur.fetchall()
     cols = [d[0] for d in cur.description]
     result = []
     for r in rows:
         d = dict(zip(cols, r))
         last_login = d.get("last_login") or ""
+        last_seen = d.get("last_seen") or ""
         if not last_login:
             d["status"] = "never_active"
         elif last_login < thirty_days_ago:
             d["status"] = "inactive"
         else:
             d["status"] = "active"
+        if last_seen and last_seen.startswith(today):
+            d["used_today"] = True
+        else:
+            d["used_today"] = False
         result.append(d)
     cur.close()
     conn.close()
