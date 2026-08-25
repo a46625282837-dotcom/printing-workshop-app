@@ -340,10 +340,15 @@ class MainWindow(QMainWindow):
         self._refresh_timer.setInterval(15000)
         self._refresh_timer.timeout.connect(self._auto_refresh_data)
 
+        self._heartbeat_timer = QTimer(self)
+        self._heartbeat_timer.setInterval(900000)
+        self._heartbeat_timer.timeout.connect(self._send_heartbeat)
+
         self._update_banners()
 
         self._notif_timer.start()
         self._refresh_timer.start()
+        self._heartbeat_timer.start()
 
         self._try_restore_session()
 
@@ -928,6 +933,19 @@ class MainWindow(QMainWindow):
         self._save_session()
         self._load_notifications()
         logger.info("تحديث بيانات المستخدم: %s", self._username)
+
+    def _send_heartbeat(self):
+        if not self._logged_in or not self._use_api:
+            return
+        try:
+            from core.api_client import get_server_url, get_token
+            import requests
+            url = f"{get_server_url()}/api/auth/check"
+            token = get_token()
+            if token:
+                requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=5)
+        except Exception:
+            pass
 
     def _auto_refresh_data(self):
         if not self._logged_in:
