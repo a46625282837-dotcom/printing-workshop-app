@@ -1475,7 +1475,7 @@ class MainWindow(QMainWindow):
         stats_row.addWidget(self._dash_stat_notlogged)
         layout.addLayout(stats_row)
 
-        self._dash_online_label = QLabel("المتصلون حالياً (0)")
+        self._dash_online_label = QLabel("المتصلون اليوم (0)")
         self._dash_online_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #333; margin-top: 10px;")
         layout.addWidget(self._dash_online_label)
 
@@ -2395,12 +2395,13 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _get_user_status(u):
-        today = date.today().isoformat()
-        if u.get("active_sessions", 0) > 0:
+        if u.get("is_connected"):
             return "online"
-        last_login = u.get("last_login", "") or ""
-        if last_login.startswith(today):
+        last_seen = u.get("last_seen", "") or ""
+        today = date.today().isoformat()
+        if last_seen.startswith(today):
             return "today"
+        last_login = u.get("last_login", "") or ""
         if not last_login:
             return "never"
         try:
@@ -2442,7 +2443,7 @@ class MainWindow(QMainWindow):
         status_filter = status_map.get(status_idx, "all")
 
         status_labels = {
-            "online": "متصل", "today": "سجل اليوم", "offline": "غير متصل",
+            "online": "متصل", "today": "استخدم اليوم", "offline": "لم يستخدمه اليوم",
             "inactive": "غير نشط 20+ يوم", "never": "لم يسجل دخول",
         }
         status_colors = {
@@ -2686,30 +2687,28 @@ class MainWindow(QMainWindow):
                 })
 
         today = date.today().isoformat()
-        today_active = sum(1 for u in users if (u.get("last_login", "").startswith(today) or u.get("active_sessions", 0) > 0))
+        today_active = sum(1 for u in users if u.get("used_today") or u.get("is_connected"))
         inactive_30d = sum(1 for u in users if u.get("status") == "inactive")
-        not_logged_today = sum(1 for u in users if not (u.get("last_login", "").startswith(today)) and u.get("active_sessions", 0) == 0)
+        not_logged_today = sum(1 for u in users if not u.get("used_today") and not u.get("is_connected"))
 
         self._update_stat_card(self._dash_stat_total, len(users))
         self._update_stat_card(self._dash_stat_today, today_active)
         self._update_stat_card(self._dash_stat_inactive, inactive_30d)
         self._update_stat_card(self._dash_stat_notlogged, not_logged_today)
 
-        online_users = [u for u in users if u.get("active_sessions", 0) > 0]
-        self._dash_online_label.setText(f"المتصلون حالياً ({len(online_users)})")
+        connected_users = [u for u in users if u.get("is_connected")]
+        self._dash_online_label.setText(f"المتصلون اليوم ({len(connected_users)})")
 
-        for i, u in enumerate(online_users):
+        for i, u in enumerate(connected_users):
             self._dash_online_table.insertRow(i)
             self._dash_online_table.setItem(i, 0, QTableWidgetItem(u.get("username", "")))
             self._dash_online_table.setItem(i, 1, QTableWidgetItem(u.get("shop_name", "")))
-            sessions_item = QTableWidgetItem(str(u.get("active_sessions", 0)))
-            sessions_item.setForeground(QColor("#27ae60"))
-            self._dash_online_table.setItem(i, 2, sessions_item)
-            last_login = u.get("last_login", "")
-            if len(last_login) >= 16:
-                last_login = last_login[:16].replace("T", " ")
-            self._dash_online_table.setItem(i, 3, QTableWidgetItem(last_login if last_login else "—"))
-        logger.info("تحديث لوحة التحكم: %d مستخدم، %d متصل", len(users), len(online_users))
+            last_seen = u.get("last_seen", "")
+            if len(last_seen) >= 16:
+                last_seen = last_seen[:16].replace("T", " ")
+            self._dash_online_table.setItem(i, 2, QTableWidgetItem(last_seen if last_seen else "—"))
+            self._dash_online_table.setItem(i, 3, QTableWidgetItem(u.get("phone", "")))
+        logger.info("تحديث لوحة التحكم: %d مستخدم، %d متصل", len(users), len(connected_users))
 
     def _open_dashboard(self):
         self._prev_page_index = self._stack.currentIndex()
