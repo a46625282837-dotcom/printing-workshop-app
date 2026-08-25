@@ -210,10 +210,10 @@ def update_last_login(username):
 
 
 def update_last_seen(username):
+    ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
     conn = _conn()
     cur = conn.cursor()
-    cur.execute(_q("UPDATE users SET last_seen = %s WHERE username = %s"),
-                (datetime.utcnow().isoformat(), username))
+    cur.execute(_q("UPDATE users SET last_seen = %s WHERE username = %s"), (ts, username))
     conn.commit()
     cur.close()
     conn.close()
@@ -249,9 +249,10 @@ def get_admin_user_stats():
 def get_all_users_with_activity():
     conn = _conn()
     cur = conn.cursor()
-    thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
+    now = datetime.utcnow()
+    thirty_days_ago = (now - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     today = date.today().isoformat()
-    eight_hours_ago = (datetime.utcnow() - timedelta(hours=8)).isoformat()
+    eight_hours_ago = (now - timedelta(hours=8)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     cur.execute(_q("""
         SELECT u.username, u.shop_name, u.phone, u.reg_date, u.is_admin, u.max_devices,
                u.last_login, u.last_seen,
