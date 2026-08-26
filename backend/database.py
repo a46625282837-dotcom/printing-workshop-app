@@ -108,6 +108,10 @@ def init_db():
             value TEXT
         )
     """))
+    cur.execute(_q("SELECT value FROM settings WHERE key = %s"), ("subscription_required",))
+    if cur.fetchone() is None:
+        cur.execute(_q("INSERT INTO settings (key, value) VALUES (%s, %s)"), ("subscription_required", "1"))
+        logger.info("Default subscription_required=1 inserted")
     cur.execute(_q(f"""
         CREATE TABLE IF NOT EXISTS notifications (
             id {SERIAL_TYPE} PRIMARY KEY,
