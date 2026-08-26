@@ -2077,6 +2077,64 @@ class A4Editor(QWidget):
 
 
 
+    def _ask_crop_choice(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("اختيار طريقة الإضافة")
+        dlg.setFixedSize(350, 160)
+        dlg.setLayoutDirection(Qt.RightToLeft)
+        dlg.setStyleSheet("QDialog{background:#f5f5f5;}")
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(15)
+        lay.setContentsMargins(20, 20, 20, 20)
+        lbl = QLabel("هل تريد قص الهويات قبل الإضافة؟")
+        lbl.setStyleSheet("font-size:14px;font-weight:bold;color:#000000;")
+        lbl.setAlignment(Qt.AlignCenter)
+        lay.addWidget(lbl)
+        sub = QLabel("إذا كانت الهويات مقصوصة اختر بدون قص")
+        sub.setStyleSheet("font-size:12px;color:#555555;")
+        sub.setAlignment(Qt.AlignCenter)
+        lay.addWidget(sub)
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(15)
+        btn_crop = QPushButton("✂ قص")
+        btn_crop.setFixedHeight(40)
+        btn_crop.setStyleSheet(
+            "QPushButton{background:#0078d4;color:white;font-size:13px;font-weight:bold;border:none;border-radius:6px;padding:0 20px}"
+            "QPushButton:hover{background:#005fa3}"
+        )
+        btn_nocrop = QPushButton("📄 بدون قص")
+        btn_nocrop.setFixedHeight(40)
+        btn_nocrop.setStyleSheet(
+            "QPushButton{background:#4caf50;color:white;font-size:13px;font-weight:bold;border:none;border-radius:6px;padding:0 20px}"
+            "QPushButton:hover{background:#388e3c}"
+        )
+        result = {"no_crop": None}
+        def on_crop():
+            result["no_crop"] = False
+            dlg.accept()
+        def on_nocrop():
+            result["no_crop"] = True
+            dlg.accept()
+        btn_crop.clicked.connect(on_crop)
+        btn_nocrop.clicked.connect(on_nocrop)
+        btn_row.addWidget(btn_crop)
+        btn_row.addWidget(btn_nocrop)
+        lay.addLayout(btn_row)
+        dlg.exec()
+        return result["no_crop"]
+
+    def _start_card_processing(self, paths, no_crop):
+        if not paths:
+            return
+        thread = CardProcessingThread(paths, no_crop)
+        thread.card_ready.connect(self._on_card_buffer_ready)
+        thread.original_ready.connect(self._on_original_buffer_ready)
+        thread.finished.connect(self._on_processing_done)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+        self._processing_thread = thread
+        self._spinner.show()
+
     def _on_drop_batch(self, paths):
 
 
@@ -2087,34 +2145,10 @@ class A4Editor(QWidget):
 
             return
 
-
-
-        thread = CardProcessingThread(paths, self.btn_nocrop.isChecked())
-
-
-
-        thread.card_ready.connect(self._on_card_buffer_ready)
-        thread.original_ready.connect(self._on_original_buffer_ready)
-
-
-
-        thread.finished.connect(self._on_processing_done)
-
-
-
-        thread.finished.connect(thread.deleteLater)
-
-
-
-        thread.start()
-
-
-
-        self._processing_thread = thread
-
-
-
-        self._spinner.show()
+        no_crop = self._ask_crop_choice()
+        if no_crop is None:
+            return
+        self._start_card_processing(paths, no_crop)
 
 
 
@@ -2134,7 +2168,7 @@ class A4Editor(QWidget):
 
 
 
-            self, "اخطع¾ر صظث†ر اظâ€‍ظâ€،ظث†ظظ¹ة", "",
+            self, "اختر صورة الهوية", "",
 
 
 
@@ -2148,34 +2182,10 @@ class A4Editor(QWidget):
 
             return
 
-
-
-        thread = CardProcessingThread(paths)
-
-
-
-        thread.card_ready.connect(self._on_card_buffer_ready)
-        thread.original_ready.connect(self._on_original_buffer_ready)
-
-
-
-        thread.finished.connect(self._on_processing_done)
-
-
-
-        thread.finished.connect(thread.deleteLater)
-
-
-
-        thread.start()
-
-
-
-        self._processing_thread = thread
-
-
-
-        self._spinner.show()
+        no_crop = self._ask_crop_choice()
+        if no_crop is None:
+            return
+        self._start_card_processing(paths, no_crop)
 
 
 

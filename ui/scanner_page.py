@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QMessageBox, QSlider,
     QGraphicsView, QGraphicsScene, QSizePolicy, QScrollArea,
     QFrame, QSpinBox, QAbstractSpinBox, QGraphicsRectItem,
-    QGraphicsPixmapItem, QGraphicsProxyWidget,
+    QGraphicsPixmapItem,
 )
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QRect
 from PySide6.QtGui import (
@@ -79,6 +79,13 @@ class _ScanView(QGraphicsView):
         items = self.scene().items(scene_pos)
         for item in items:
             if isinstance(item, QGraphicsPixmapItem) and (item.flags() & QGraphicsPixmapItem.ItemIsMovable):
+                key = item.data(0)
+                if key and isinstance(key, tuple):
+                    parent = self._page_parent
+                    if parent:
+                        page_gidxs = parent._page_image_indices(parent._current_page)
+                        if key[1] < len(page_gidxs):
+                            parent._selected_idx = page_gidxs[key[1]]
                 self.setDragMode(QGraphicsView.NoDrag)
                 self._dragging_item = item
                 self._drag_offset = scene_pos - item.pos()
@@ -143,7 +150,7 @@ class _ScanView(QGraphicsView):
             p.wheelEvent(event)
 
 
-def _layout_images_on_scene(scene, images, page_num, total_pages, multi_scan=False, img_positions=None, img_scales=None, scale_callback=None):
+def _layout_images_on_scene(scene, images, page_num, total_pages, multi_scan=False, img_positions=None, img_scales=None):
     scene.addRect(0, 0, A4_W, A4_H, QPen(QColor("#cccccc")), QColor("white"))
     aw = A4_W - 2 * MARGIN
     ah = A4_H - 2 * MARGIN
@@ -185,46 +192,6 @@ def _layout_images_on_scene(scene, images, page_num, total_pages, multi_scan=Fal
                 item.setPos(x, y)
                 if img_positions is not None:
                     img_positions[key] = QPointF(x, y)
-            if scale_callback:
-                btn_size = 20
-                btn_style = (
-                    "QPushButton{background:#2196F3;color:white;border:none;"
-                    "border-radius:10px;font-weight:bold;font-size:14px;}"
-                    "QPushButton:hover{background:#1976D2;}"
-                )
-                btn_reset_style = (
-                    "QPushButton{background:#FF9800;color:white;border:none;"
-                    "border-radius:10px;font-weight:bold;font-size:10px;}"
-                    "QPushButton:hover{background:#F57C00;}"
-                )
-                proxy_minus = QGraphicsProxyWidget()
-                btn_minus = QPushButton("-")
-                btn_minus.setFixedSize(btn_size, btn_size)
-                btn_minus.setStyleSheet(btn_style)
-                btn_minus.clicked.connect(lambda _, k=key: scale_callback(k, -1))
-                proxy_minus.setWidget(btn_minus)
-                scene.addItem(proxy_minus)
-                bx = item.pos().x() + scaled.width() / 2 - btn_size - 2
-                by = item.pos().y() - btn_size - 2
-                proxy_minus.setPos(bx, by)
-
-                proxy_plus = QGraphicsProxyWidget()
-                btn_plus = QPushButton("+")
-                btn_plus.setFixedSize(btn_size, btn_size)
-                btn_plus.setStyleSheet(btn_style)
-                btn_plus.clicked.connect(lambda _, k=key: scale_callback(k, 1))
-                proxy_plus.setWidget(btn_plus)
-                scene.addItem(proxy_plus)
-                proxy_plus.setPos(bx + btn_size + 4, by)
-
-                proxy_reset = QGraphicsProxyWidget()
-                btn_reset = QPushButton("1:1")
-                btn_reset.setFixedSize(28, btn_size)
-                btn_reset.setStyleSheet(btn_reset_style)
-                btn_reset.clicked.connect(lambda _, k=key: scale_callback(k, 0))
-                proxy_reset.setWidget(btn_reset)
-                scene.addItem(proxy_reset)
-                proxy_reset.setPos(bx + btn_size * 2 + 8, by)
     font = QFont()
     font.setPointSize(14)
     font.setBold(True)
@@ -433,6 +400,41 @@ class ScannerPage(QWidget):
         self._zoom_lbl = QLabel("100%")
         self._zoom_lbl.setFixedWidth(45)
         zoom_row.addWidget(self._zoom_lbl)
+        zoom_row.addSpacing(15)
+        btn_img_minus = QPushButton("- صورة")
+        btn_img_minus.setFixedHeight(30)
+        btn_img_minus.setStyleSheet(
+            "QPushButton{background:#9C27B0;color:white;font-weight:bold;padding:0 10px;border:none;border-radius:4px;}"
+            "QPushButton:hover{background:#7B1FA2;}"
+        )
+        btn_img_minus.clicked.connect(lambda: self._scale_selected_image(-1))
+        zoom_row.addWidget(btn_img_minus)
+        self._btn_img_minus = btn_img_minus
+
+        btn_img_plus = QPushButton("+ صورة")
+        btn_img_plus.setFixedHeight(30)
+        btn_img_plus.setStyleSheet(
+            "QPushButton{background:#9C27B0;color:white;font-weight:bold;padding:0 10px;border:none;border-radius:4px;}"
+            "QPushButton:hover{background:#7B1FA2;}"
+        )
+        btn_img_plus.clicked.connect(lambda: self._scale_selected_image(1))
+        zoom_row.addWidget(btn_img_plus)
+        self._btn_img_plus = btn_img_plus
+
+        btn_img_reset = QPushButton("1:1 صورة")
+        btn_img_reset.setFixedHeight(30)
+        btn_img_reset.setStyleSheet(
+            "QPushButton{background:#FF9800;color:white;font-weight:bold;padding:0 10px;border:none;border-radius:4px;}"
+            "QPushButton:hover{background:#F57C00;}"
+        )
+        btn_img_reset.clicked.connect(lambda: self._scale_selected_image(0))
+        zoom_row.addWidget(btn_img_reset)
+        self._btn_img_reset = btn_img_reset
+
+        self._btn_img_minus.setVisible(False)
+        self._btn_img_plus.setVisible(False)
+        self._btn_img_reset.setVisible(False)
+
         zoom_row.addStretch()
         layout.addLayout(zoom_row)
 
@@ -563,6 +565,9 @@ class ScannerPage(QWidget):
             self._btn_multi_scan.setText("📎 متعدد ✅")
         else:
             self._btn_multi_scan.setText("📎 تصوير متعدد")
+        self._btn_img_minus.setVisible(self._multi_scan)
+        self._btn_img_plus.setVisible(self._multi_scan)
+        self._btn_img_reset.setVisible(self._multi_scan)
         self._update_paper()
         logger.info("وضع التصوير المتعدد: %s", "مفعّل" if self._multi_scan else "معطّل")
 
@@ -819,8 +824,11 @@ class ScannerPage(QWidget):
             self._current_page = self._page_map.get(gidx, 0)
             self._set_tool("select")
             self._rebuild_thumbnails()
-            self._update_paper()
-            self._fit_view()
+            try:
+                self._update_paper()
+                self._fit_view()
+            except Exception:
+                pass
 
     def _delete_image(self, gidx):
         if not self._images:
@@ -872,12 +880,14 @@ class ScannerPage(QWidget):
         self._update_paper()
         self._fit_view()
 
-    def _on_image_scale(self, key, direction):
+    def _scale_selected_image(self, direction):
         if not self._multi_scan:
             return
-        page_num, img_idx = key
-        if img_idx >= len(self._images):
+        page_gidxs = self._page_image_indices(self._current_page)
+        if self._selected_idx not in page_gidxs:
             return
+        local_idx = page_gidxs.index(self._selected_idx)
+        key = (self._current_page, local_idx)
         cur = self._img_scales.get(key, 1.0)
         if direction == 0:
             new_scale = 1.0
@@ -889,8 +899,26 @@ class ScannerPage(QWidget):
             self._img_scales[key] = new_scale
         else:
             self._img_scales.pop(key, None)
-        self._update_paper()
-        self._fit_view()
+        items = [it for it in self._scene.items()
+                 if isinstance(it, QGraphicsPixmapItem) and it.data(0) == key]
+        if items:
+            item = items[0]
+            qimg = self._images[self._selected_idx]
+            if not qimg.isNull():
+                aw = A4_W - 2 * MARGIN
+                ah = A4_H - 2 * MARGIN
+                half_w = aw / 2
+                pix = QPixmap.fromImage(qimg)
+                scaled_w = max(10, int(half_w * new_scale))
+                scaled_h = max(10, int(ah * new_scale))
+                new_pix = pix.scaled(scaled_w, scaled_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                old_pos = item.pos()
+                old_w = item.pixmap().width()
+                old_h = item.pixmap().height()
+                item.setPixmap(new_pix)
+                item.setPos(old_pos.x() + (old_w - new_pix.width()) / 2,
+                            old_pos.y() + (old_h - new_pix.height()) / 2)
+                self._img_positions[key] = item.pos()
 
     def _update_paper(self):
         self._view._cleanup()
@@ -898,8 +926,7 @@ class ScannerPage(QWidget):
         page_images = self._page_images(self._current_page)
         _layout_images_on_scene(self._scene, page_images,
                                 self._current_page, self._total_pages(),
-                                self._multi_scan, self._img_positions, self._img_scales,
-                                self._on_image_scale)
+                                self._multi_scan, self._img_positions, self._img_scales)
         self._scene.setSceneRect(0, 0, A4_W, A4_H)
         self._scene.update()
         self._view.viewport().update()
@@ -908,8 +935,7 @@ class ScannerPage(QWidget):
         s = QGraphicsScene()
         page_images = self._page_images(page_num)
         _layout_images_on_scene(s, page_images, page_num, self._total_pages(),
-                                self._multi_scan, self._img_positions, self._img_scales,
-                                self._on_image_scale)
+                                self._multi_scan, self._img_positions, self._img_scales)
         return s
 
     def _fit_view(self):

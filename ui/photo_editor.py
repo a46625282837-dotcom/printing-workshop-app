@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QVBoxLayout,
                                QGraphicsItem, QGraphicsRectItem, QDialog, QStyle,
                                QMenu, QInputDialog, QComboBox, QProgressBar,
                                QSlider, QSplitter, QGroupBox, QGridLayout)
-from PySide6.QtCore import Qt, Signal, QRectF, QSettings, QThread, QEvent, QBuffer, QByteArray, QIODevice
+from PySide6.QtCore import Qt, Signal, QRectF, QSettings, QThread, QEvent, QBuffer, QByteArray, QIODevice, QTimer, QTime
 from PySide6.QtGui import QPixmap, QImage, QPen, QColor, QBrush, QPainter, QShortcut, QKeySequence, QPainterPath, QAction, QPageSize
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog
 from PIL import Image
@@ -33,6 +33,9 @@ class PhotoItem(QGraphicsPixmapItem):
         self._original_pixmap = pixmap
         self._crop_rect = None
         self._adjust_settings = {}
+        self._processing = False
+        self._spin_angle = 0
+        self._spin_timer = None
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
 
@@ -41,6 +44,24 @@ class PhotoItem(QGraphicsPixmapItem):
 
     def set_item_rotation(self, angle):
         self._rotation = angle % 360
+        self.update()
+
+    def set_processing(self, val):
+        self._processing = val
+        if val:
+            self._spin_angle = 0
+            if self._spin_timer is None:
+                self._spin_timer = QTimer()
+                self._spin_timer.timeout.connect(self._spin_tick)
+            self._spin_timer.start(50)
+        else:
+            if self._spin_timer:
+                self._spin_timer.stop()
+            self._spin_angle = 0
+        self.update()
+
+    def _spin_tick(self):
+        self._spin_angle = (self._spin_angle + 30) % 360
         self.update()
 
     def boundingRect(self):
@@ -71,6 +92,20 @@ class PhotoItem(QGraphicsPixmapItem):
             painter.setPen(QPen(QColor("#1a73e8"), 4))
             painter.setBrush(QBrush(QColor(26, 115, 232, 20)))
             painter.drawRect(QRectF(1, 1, self._pw - 2, self._ph - 2))
+        if self._processing:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor(0, 0, 0, 120)))
+            painter.drawRect(QRectF(0, 0, self._pw, self._ph))
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            pen = QPen(QColor("#ffffff"))
+            pen.setWidth(3)
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            side = min(self._pw, self._ph) * 0.25
+            cx, cy = self._pw / 2, self._ph / 2
+            r = side / 2
+            start = self._spin_angle * 16
+            painter.drawArc(QRectF(cx - r, cy - r, side, side), start, 90 * 16)
 
     def mousePressEvent(self, event):
         self.setSelected(True)
@@ -842,11 +877,13 @@ class PhotoProcessingThread(QThread):
         self._items = paths_or_bytes
         self._start_index = start_index
 
-    MAX_PROCESS_PX = 1200
+    MAX_PROCESS_PX = 800
 
     def run(self):
         from core.photo_processor import remove_background, auto_crop_subject, composite_white_bg
-        for i, pb in enumerate(self._items):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        def _process_one(idx_pb):
+            i, pb = idx_pb
             try:
                 if isinstance(pb, str):
                     pil = Image.open(pb)
@@ -855,13 +892,12 @@ class PhotoProcessingThread(QThread):
                 pil = pil.convert("RGB")
                 if max(pil.size) > self.MAX_PROCESS_PX:
                     pil.thumbnail((self.MAX_PROCESS_PX, self.MAX_PROCESS_PX), Image.LANCZOS)
-                    logger.info("تصغير الصورة %d إلى %s للمعالجة", i, pil.size)
                 no_bg = remove_background(pil)
                 no_bg = auto_crop_subject(no_bg)
                 no_bg = composite_white_bg(no_bg)
                 buf = io.BytesIO()
                 no_bg.save(buf, format="PNG")
-                self.photo_ready.emit(buf.getvalue(), self._start_index + i)
+                return self._start_index + i, buf.getvalue(), None
             except Exception as e:
                 logger.error("فشل معالجة الصورة %d: %s", i, e)
                 try:
@@ -872,9 +908,16 @@ class PhotoProcessingThread(QThread):
                     fallback = fallback.convert("RGB")
                     buf = io.BytesIO()
                     fallback.save(buf, format="PNG")
-                    self.photo_ready.emit(buf.getvalue(), self._start_index + i)
+                    return self._start_index + i, buf.getvalue(), None
                 except Exception as e2:
-                    logger.error("فشل عرض الصورة %d حتى بدون معالجة: %s", i, e2)
+                    logger.error("فشل عرض الصورة %d: %s", i, e2)
+                    return self._start_index + i, None, str(e2)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(_process_one, (i, pb)) for i, pb in enumerate(self._items)]
+            for f in as_completed(futures):
+                idx, data, err = f.result()
+                if data:
+                    self.photo_ready.emit(data, idx)
         self.finished_all.emit()
 
 
@@ -1124,6 +1167,7 @@ class PhotoEditor(QWidget):
                 qpix.loadFromData(buf.getvalue())
                 if not qpix.isNull():
                     self._place_photo(qpix)
+                    self.photos[-1].set_processing(True)
             except Exception as e:
                 logger.error("فشل عرض الصورة الأصلية: %s", e)
         self._thread = PhotoProcessingThread(list(paths_or_bytes_list), start_index=old_len)
@@ -1139,6 +1183,7 @@ class PhotoEditor(QWidget):
             item = self.photos[index]
             item.setPixmap(qpix)
             item._original_pixmap = qpix
+            item.set_processing(False)
         self._progress_count += 1
         self._progress_bar.setValue(self._progress_count)
         self._progress_bar.setFormat(f"{self._progress_count}/{self._progress_total}")
