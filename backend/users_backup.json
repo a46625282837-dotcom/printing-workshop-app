@@ -1,0 +1,19 @@
+{
+  "last_backup": "2026-08-26T16:16:42Z",
+  "users": [
+    {
+      "username": "n",
+      "shop_name": "n",
+      "phone": "55225522551",
+      "reg_date": "2026-08-26",
+      "is_admin": false
+    },
+    {
+      "username": "ahmed",
+      "shop_name": "المالك",
+      "phone": "",
+      "reg_date": "2026-08-26",
+      "is_admin": true
+    }
+  ]
+}

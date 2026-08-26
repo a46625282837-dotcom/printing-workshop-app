@@ -1,6 +1,7 @@
 import logging
 import base64
 import uuid
+import json
 from datetime import date, timedelta
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
@@ -41,15 +42,19 @@ jwt = JWTManager(app)
 
 @jwt.token_in_blocklist_loader
 def _session_check(jwt_header, jwt_payload):
-    username = jwt_payload.get("sub")
-    token_id = jwt_payload.get("tid")
-    if not username or not token_id:
-        return True
-    user = get_user(username)
-    if not user:
-        return True
-    sessions = get_user_sessions(username)
-    return not any(s["token_id"] == token_id for s in sessions)
+    try:
+        username = jwt_payload.get("sub")
+        token_id = jwt_payload.get("tid")
+        if not username or not token_id:
+            return True
+        user = get_user(username)
+        if not user:
+            return True
+        sessions = get_user_sessions(username)
+        return not any(s["token_id"] == token_id for s in sessions)
+    except Exception:
+        logger.warning("Session check failed, treating as valid")
+        return False
 
 
 @jwt.revoked_token_loader
@@ -206,6 +211,7 @@ def api_register():
         update_token_id(username, token_id)
         add_session(username, token_id)
         update_last_seen(username)
+        _backup_users()
         token = create_access_token(identity=username, additional_claims={"tid": token_id})
         return jsonify({"token": token, "username": username}), 201
     return jsonify({"error": "اسم المستخدم موجود مسبقاً"}), 409
@@ -600,6 +606,65 @@ def api_admin_all_users():
     if get_user(get_jwt_identity()).get("is_admin") != 1:
         return jsonify({"error": "صلاحية مطلوبة"}), 403
     return jsonify(get_all_users_with_activity())
+
+
+BACKUP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users_backup.json")
+
+
+def _backup_users():
+    try:
+        users = get_all_users()
+        data = {
+            "last_backup": datetime.utcnow().isoformat() + "Z",
+            "users": [
+                {
+                    "username": u["username"],
+                    "shop_name": u.get("shop_name", ""),
+                    "phone": u.get("phone", ""),
+                    "reg_date": u.get("reg_date", ""),
+                    "is_admin": bool(u.get("is_admin")),
+                }
+                for u in users
+            ],
+        }
+        with open(BACKUP_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info("Backup saved: %d users", len(data["users"]))
+    except Exception as e:
+        logger.error("Backup failed: %s", e)
+
+
+@app.route("/api/admin/backup", methods=["POST"])
+@jwt_required()
+def api_admin_backup():
+    if get_user(get_jwt_identity()).get("is_admin") != 1:
+        return jsonify({"error": "صلاحية مطلوبة"}), 403
+    _backup_users()
+    return jsonify({"message": "تم النسخ الاحتياطي"})
+
+
+@app.route("/api/admin/restore", methods=["POST"])
+@jwt_required()
+def api_admin_restore():
+    if get_user(get_jwt_identity()).get("is_admin") != 1:
+        return jsonify({"error": "صلاحية مطلوبة"}), 403
+    if not os.path.exists(BACKUP_FILE):
+        return jsonify({"error": "ملف النسخ الاحتياطي غير موجود"}), 404
+    with open(BACKUP_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    restored = 0
+    for u in data.get("users", []):
+        username = u.get("username", "")
+        if not username or username == "ahmed":
+            continue
+        if get_user(username):
+            continue
+        temp_password = "Reset" + username[:3]
+        if create_user(username, temp_password, u.get("shop_name", ""), u.get("phone", "")):
+            restored += 1
+    _backup_users()
+    return jsonify({"message": f"تم استعادة {restored} مستخدم", "restored": restored, "hint": "كلمة المرور المؤقتة: Reset + أول 3 أحرف من اسم المستخدم"})
+
 
 def run_server(host="0.0.0.0", port=5000, debug=False):
     logger.info("Starting backend server on %s:%s", host, port)
