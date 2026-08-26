@@ -100,7 +100,7 @@ def _request(method, path, **kwargs):
                 payload = resp.json()
             except Exception:
                 payload = None
-            if resp.status_code in _SLEEPY_STATUSES and attempt < 2:
+            if resp.status_code in _SLEEPY_STATUSES and attempt < 2 and not (isinstance(payload, dict) and payload.get("error")):
                 logger.info("Server may be waking up (status %s), retrying in %ds...", resp.status_code, _RETRY_DELAY)
                 time.sleep(_RETRY_DELAY)
                 continue

@@ -8,6 +8,7 @@ ROT_HANDLE_SIZE = 12
 
 
 class IDCardItem(QGraphicsPixmapItem):
+
     def __init__(self, pixmap: QPixmap, index: int = 0, parent=None):
         super().__init__(pixmap, parent)
         self.index = index
@@ -21,6 +22,8 @@ class IDCardItem(QGraphicsPixmapItem):
         self._drag_start = None
         self._move_hold = False
         self.on_dropped = None
+        self.on_double_clicked = None
+        self._original_pixmap = None
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
 
@@ -277,3 +280,17 @@ class IDCardItem(QGraphicsPixmapItem):
             self._move_hold = False
             if self._image_overflows():
                 self.setFlag(QGraphicsItem.ItemIsMovable, False)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton and self._original_pixmap is not None:
+            if self._rotate_rect.contains(event.pos()) or \
+               self._zoom_in_rect.contains(event.pos()) or \
+               self._zoom_out_rect.contains(event.pos()) or \
+               self._move_rect.contains(event.pos()):
+                super().mouseDoubleClickEvent(event)
+                return
+            if self.on_double_clicked:
+                self.on_double_clicked(self)
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)

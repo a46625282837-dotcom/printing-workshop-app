@@ -341,7 +341,7 @@ class MainWindow(QMainWindow):
         self._refresh_timer.timeout.connect(self._auto_refresh_data)
 
         self._heartbeat_timer = QTimer(self)
-        self._heartbeat_timer.setInterval(900000)
+        self._heartbeat_timer.setInterval(300000)
         self._heartbeat_timer.timeout.connect(self._send_heartbeat)
 
         self._update_banners()
@@ -852,24 +852,17 @@ class MainWindow(QMainWindow):
         from core.database import api_check_auth
         qdata, qerr = api_check_auth()
         if qerr:
-            is_network = any(k in (qerr or "") for k in [
-                "لا يمكن الاتصال", "ConnectionError", "Timeout",
-                "timed out", "RemoteDisconnected",
-            ])
-            if is_network:
-                self._logged_in = True
-                self._username = username
-                self._display_name = sess.get("display_name", username)
-                self._is_admin = sess.get("is_admin", False)
-                self._subscription_required = bool(sess.get("subscription_required", True))
-                self._api_data = {}
-                self._update_auth_ui()
-                self._switch_to_main()
-                logger.info("استعادة جلسة سابقة (بدون تحقق من السيرفر): %s", username)
-                QTimer.singleShot(3000, self._load_notifications)
-                return True
-            self._clear_session()
-            return False
+            self._logged_in = True
+            self._username = username
+            self._display_name = sess.get("display_name", username)
+            self._is_admin = sess.get("is_admin", False)
+            self._subscription_required = bool(sess.get("subscription_required", True))
+            self._api_data = {}
+            self._update_auth_ui()
+            self._switch_to_main()
+            logger.info("استعادة جلسة سابقة (التحقق فشل): %s — %s", username, qerr)
+            QTimer.singleShot(3000, self._load_notifications)
+            return True
         self._logged_in = True
         self._username = username
         self._display_name = sess.get("display_name", username)
@@ -942,10 +935,39 @@ class MainWindow(QMainWindow):
             import requests
             url = f"{get_server_url()}/api/auth/check"
             token = get_token()
-            if token:
-                requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=5)
-        except Exception:
-            pass
+            if not token:
+                return
+            for attempt in range(3):
+                try:
+                    resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
+                    if resp.status_code == 200:
+                        logger.info("Heartbeat OK")
+                        return
+                    if resp.status_code in (502, 503, 504) and attempt < 2:
+                        logger.info("Heartbeat: server waking up (status %s), retry %d/3", resp.status_code, attempt + 1)
+                        import time
+                        time.sleep(5)
+                        continue
+                    logger.warning("Heartbeat failed: status %s", resp.status_code)
+                    return
+                except requests.ConnectionError:
+                    if attempt < 2:
+                        logger.info("Heartbeat: connection failed, retry %d/3", attempt + 1)
+                        import time
+                        time.sleep(5)
+                        continue
+                    logger.warning("Heartbeat: cannot connect after 3 attempts")
+                    return
+                except requests.Timeout:
+                    if attempt < 2:
+                        logger.info("Heartbeat: timeout, retry %d/3", attempt + 1)
+                        import time
+                        time.sleep(5)
+                        continue
+                    logger.warning("Heartbeat: timeout after 3 attempts")
+                    return
+        except Exception as e:
+            logger.warning("Heartbeat error: %s", e)
 
     def _auto_refresh_data(self):
         if not self._logged_in:
@@ -954,6 +976,7 @@ class MainWindow(QMainWindow):
             from core.database import api_check_auth
             qdata, qerr = api_check_auth()
             if qerr:
+                logger.warning("Refresh check_auth failed: %s", qerr)
                 return
             if qdata:
                 old_sub = self._subscription_required

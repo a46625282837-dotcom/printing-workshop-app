@@ -67,8 +67,9 @@ def _register_wwk_extension():
         logging.warning("فشل تسجيل امتداد .wwk: %s", e)
 
 
-APP_VERSION = "1.3.9"
+APP_VERSION = "1.4.0"
 _GITHUB_REPO = "a46625282837-dotcom/printing-workshop-app"
+_DOWNLOAD_PAGE = "https://a46625282837-dotcom.github.io/worsha-download/"
 
 
 def _check_for_update():
@@ -80,7 +81,12 @@ def _check_for_update():
             data = json.loads(resp.read())
             tag = data.get("tag_name", "").lstrip("v")
             if tag and tag != APP_VERSION:
-                return {"version": tag, "url": data.get("html_url", ""), "notes": data.get("body", "")}
+                from PySide6.QtCore import QSettings
+                settings = QSettings("ورشة طباعة", "App")
+                last_shown = settings.value("update_shown_version", "", type=str)
+                if last_shown == tag:
+                    return None
+                return {"version": tag, "notes": data.get("body", "")}
     except Exception as e:
         logging.debug("Update check failed: %s", e)
     return None
@@ -88,16 +94,20 @@ def _check_for_update():
 
 def _notify_update(update_info):
     from PySide6.QtWidgets import QMessageBox
+    from PySide6.QtCore import QSettings
     msg = QMessageBox()
     msg.setWindowTitle("تحديث جديد متاح")
     msg.setIcon(QMessageBox.Information)
-    msg.setText(f"גרסה {update_info['version']} متاحة!")
+    msg.setText(f"إصدار {update_info['version']} متاح!")
     msg.setInformativeText(f"الإصدار الحالي: {APP_VERSION}\nالإصدار الجديد: {update_info['version']}\n\nهل تريد التحميل؟")
     msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
     msg.setDefaultButton(QMessageBox.Yes)
-    if msg.exec() == QMessageBox.Yes:
+    result = msg.exec()
+    settings = QSettings("ورشة طباعة", "App")
+    settings.setValue("update_shown_version", update_info["version"])
+    if result == QMessageBox.Yes:
         import webbrowser
-        webbrowser.open(update_info["url"])
+        webbrowser.open(_DOWNLOAD_PAGE)
 
 
 def main():

@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QVBoxLayout,
 
 
 
-                               QInputDialog, QMenu)
+                                QInputDialog, QMenu, QScrollArea)
 
 
 
@@ -38,7 +38,7 @@ from PySide6.QtCore import Qt, Signal, QSettings, QThread, QTimer, QRectF
 
 
 
-from PySide6.QtGui import QPixmap, QPen, QColor, QBrush, QPainter, QShortcut, QKeySequence
+from PySide6.QtGui import QPixmap, QPen, QColor, QBrush, QPainter, QShortcut, QKeySequence, QTransform
 
 
 
@@ -52,7 +52,8 @@ from PySide6.QtPrintSupport import QPrinter, QPrinterInfo
 
 from PIL import Image
 
-
+import numpy as np
+import cv2
 
 from core.printer import print_scene, get_selected_printer_name, set_printer_name, PAPER_TYPES, PAPER_TYPE_NAMES, get_last_paper_type, set_last_paper_type
 
@@ -700,6 +701,8 @@ class CardProcessingThread(QThread):
 
     card_ready = Signal(bytes)
 
+    original_ready = Signal(bytes)
+
 
 
     processing_done = Signal()
@@ -786,6 +789,15 @@ class CardProcessingThread(QThread):
 
 
 
+                orig_buf = io.BytesIO()
+                try:
+                    pil.convert("RGB").save(orig_buf, format="PNG")
+                    original_bytes = orig_buf.getvalue()
+                except Exception:
+                    original_bytes = b""
+
+
+
                 if self._no_crop:
 
 
@@ -866,7 +878,7 @@ class CardProcessingThread(QThread):
 
 
 
-                return buf.getvalue()
+                return buf.getvalue(), original_bytes
 
 
 
@@ -946,7 +958,8 @@ class CardProcessingThread(QThread):
 
 
 
-                            self.card_ready.emit(val)
+                            self.card_ready.emit(val[0])
+                            self.original_ready.emit(val[1])
 
 
 
@@ -1120,6 +1133,76 @@ class LoadingSpinner(QWidget):
 
 
 
+
+
+class _CropOverlay(QWidget):
+    def __init__(self, pixmap, parent=None):
+        super().__init__(parent)
+        self._original_pixmap = pixmap
+        self._points = []
+        self._max_points = 4
+        self._scale = 1.0
+        self._offset_x = 0
+        self._offset_y = 0
+        self._drawing_pixmap = None
+        self.setMinimumSize(200, 200)
+        self.setCursor(Qt.CrossCursor)
+
+    def set_display(self, pixmap, scale, offset_x, offset_y):
+        self._drawing_pixmap = pixmap
+        self._scale = scale
+        self._offset_x = offset_x
+        self._offset_y = offset_y
+        self.update()
+
+    def clear_points(self):
+        self._points.clear()
+        self.update()
+
+    def get_original_points(self):
+        result = []
+        for pt in self._points:
+            ox = (pt.x() - self._offset_x) / self._scale
+            oy = (pt.y() - self._offset_y) / self._scale
+            result.append((ox, oy))
+        return result
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and len(self._points) < self._max_points:
+            from PySide6.QtCore import QPointF
+            self._points.append(QPointF(event.position().x(), event.position().y()))
+            self.update()
+            event.accept()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self._drawing_pixmap and not self._drawing_pixmap.isNull():
+            scaled = self._drawing_pixmap.scaled(
+                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            sx = self.width() - scaled.width()
+            sy = self.height() - scaled.height()
+            self._offset_x = sx // 2
+            self._offset_y = sy // 2
+            self._scale = scaled.width() / self._drawing_pixmap.width() if self._drawing_pixmap.width() else 1.0
+            p.drawPixmap(self._offset_x, self._offset_y, scaled)
+        else:
+            p.fillRect(self.rect(), QColor("#1a1a1a"))
+            p.setPen(QColor("#888"))
+            p.drawText(self.rect(), Qt.AlignCenter, "جاري التحميل...")
+        if len(self._points) >= 2:
+            pen = QPen(QColor("#00ff00"))
+            pen.setWidth(2)
+            p.setPen(pen)
+            for i in range(1, len(self._points)):
+                p.drawLine(self._points[i - 1], self._points[i])
+            if len(self._points) == 4:
+                p.drawLine(self._points[3], self._points[0])
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#00ff00"))
+        for pt in self._points:
+            p.drawEllipse(pt, 6, 6)
+        p.end()
 
 
 class A4Editor(QWidget):
@@ -2011,6 +2094,7 @@ class A4Editor(QWidget):
 
 
         thread.card_ready.connect(self._on_card_buffer_ready)
+        thread.original_ready.connect(self._on_original_buffer_ready)
 
 
 
@@ -2071,6 +2155,7 @@ class A4Editor(QWidget):
 
 
         thread.card_ready.connect(self._on_card_buffer_ready)
+        thread.original_ready.connect(self._on_original_buffer_ready)
 
 
 
@@ -2111,6 +2196,285 @@ class A4Editor(QWidget):
 
 
             self._place_card(qpix)
+
+
+
+
+    def _on_original_buffer_ready(self, buf):
+        qpix = QPixmap()
+        if qpix.loadFromData(buf) and self.cards:
+            self.cards[-1]._original_pixmap = qpix
+
+    def _show_original_image(self, card_item):
+        if card_item._original_pixmap is None or card_item._original_pixmap.isNull():
+            return
+        original_pix = card_item._original_pixmap
+        card_idx = card_item.index
+        dlg = QDialog(self)
+        dlg.setWindowTitle("قص يدوي")
+        dlg.setMinimumSize(800, 600)
+        dlg.setLayoutDirection(Qt.RightToLeft)
+        dlg.setStyleSheet("QDialog{background:#2b2b2b;}")
+        v_layout = QVBoxLayout(dlg)
+        v_layout.setContentsMargins(10, 10, 10, 10)
+
+        overlay = _CropOverlay(original_pix, dlg)
+        preview_label = QLabel()
+        preview_label.setAlignment(Qt.AlignCenter)
+        preview_label.setStyleSheet("background:#1a1a1a;border-radius:8px;")
+        preview_label.hide()
+        v_layout.addWidget(overlay, 1)
+        v_layout.addWidget(preview_label, 1)
+
+        preview_pixmap = [None]
+        preview_transforms = [0]
+        preview_hflip = [False]
+
+        def _do_crop(pts):
+            cropped = self._perspective_crop(original_pix, pts)
+            if cropped.isNull():
+                return None
+            return cropped
+
+        def _apply_transforms(pix):
+            p = pix
+            if preview_hflip[0]:
+                t = QTransform()
+                t.scale(-1, 1)
+                p = p.transformed(t, Qt.SmoothTransformation)
+            if preview_transforms[0]:
+                t = QTransform()
+                t.rotate(preview_transforms[0])
+                p = p.transformed(t, Qt.SmoothTransformation)
+            return p
+
+        def _show_preview(cropped):
+            preview_pixmap[0] = cropped
+            overlay.hide()
+            preview_label.show()
+            transformed = _apply_transforms(cropped)
+            scaled = transformed.scaled(preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            preview_label.setPixmap(scaled)
+            _update_buttons(True)
+
+        def _show_overlay():
+            preview_pixmap[0] = None
+            preview_label.hide()
+            overlay.show()
+            overlay.clear_points()
+            _update_buttons(False)
+
+        btn_row = QHBoxLayout()
+        btn_clear = QPushButton("مسح النقاط")
+        btn_clear.setFixedHeight(36)
+        btn_clear.setStyleSheet(
+            "QPushButton{background:#e67e22;color:white;font-weight:bold;padding:0 14px;border:none;border-radius:4px;}"
+            "QPushButton:hover{background:#f39c12;}"
+        )
+        btn_clear.clicked.connect(overlay.clear_points)
+        btn_row.addWidget(btn_clear)
+
+        btn_crop = QPushButton("قص")
+        btn_crop.setFixedHeight(36)
+        btn_crop.setStyleSheet(
+            "QPushButton{background:#2196F3;color:white;font-weight:bold;padding:0 14px;border:none;border-radius:4px;}"
+            "QPushButton:hover{background:#1976D2;}"
+        )
+        btn_row.addWidget(btn_crop)
+
+        btn_hflip = QPushButton("↔ قلب أفقي")
+        btn_hflip.setFixedHeight(36)
+        btn_hflip.setStyleSheet(
+            "QPushButton{background:#9C27B0;color:white;font-weight:bold;padding:0 14px;border:none;border-radius:4px;}"
+            "QPushButton:hover{background:#7B1FA2;}"
+        )
+        btn_row.addWidget(btn_hflip)
+
+        btn_vflip = QPushButton("↕ قلب عمودي")
+        btn_vflip.setFixedHeight(36)
+        btn_vflip.setStyleSheet(
+            "QPushButton{background:#9C27B0;color:white;font-weight:bold;padding:0 14px;border:none;border-radius:4px;}"
+            "QPushButton:hover{background:#7B1FA2;}"
+        )
+        btn_row.addWidget(btn_vflip)
+
+        btn_rotate = QPushButton("↻ دوران")
+        btn_rotate.setFixedHeight(36)
+        btn_rotate.setStyleSheet(
+            "QPushButton{background:#FF9800;color:white;font-weight:bold;padding:0 14px;border:none;border-radius:4px;}"
+            "QPushButton:hover{background:#F57C00;}"
+        )
+        btn_row.addWidget(btn_rotate)
+
+        btn_row.addStretch()
+
+        btn_add = QPushButton("إضافة")
+        btn_add.setFixedHeight(36)
+        btn_add.setStyleSheet(
+            "QPushButton{background:#4CAF50;color:white;font-weight:bold;padding:0 20px;border:none;border-radius:4px;}"
+            "QPushButton:hover{background:#45a049;}"
+        )
+        btn_row.addWidget(btn_add)
+
+        btn_close = QPushButton("إغلاق")
+        btn_close.setFixedHeight(36)
+        btn_close.setStyleSheet(
+            "QPushButton{background:#555;color:white;border:none;"
+            "border-radius:4px;padding:0 20px;font-weight:bold;}"
+            "QPushButton:hover{background:#777;}"
+        )
+        btn_close.clicked.connect(dlg.accept)
+        btn_row.addWidget(btn_close)
+        v_layout.addLayout(btn_row)
+
+        def _update_buttons(in_preview):
+            btn_clear.setEnabled(not in_preview)
+            btn_crop.setEnabled(not in_preview)
+            btn_hflip.setVisible(in_preview)
+            btn_vflip.setVisible(in_preview)
+            btn_rotate.setVisible(in_preview)
+            btn_add.setEnabled(in_preview)
+
+        def on_crop():
+            try:
+                pts = overlay.get_original_points()
+                if len(pts) != 4:
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.warning(dlg, "خطأ", "حدد 4 نقاط أولاً")
+                    return
+                cropped = _do_crop(pts)
+                if cropped is None:
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.warning(dlg, "خطأ", "فشل في القص")
+                    return
+                _show_preview(cropped)
+            except Exception as e:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.critical(dlg, "خطأ", str(e))
+
+        def on_hflip():
+            preview_hflip[0] = not preview_hflip[0]
+            if preview_pixmap[0]:
+                transformed = _apply_transforms(preview_pixmap[0])
+                scaled = transformed.scaled(preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                preview_label.setPixmap(scaled)
+
+        def on_vflip():
+            if preview_pixmap[0]:
+                t = QTransform()
+                t.scale(1, -1)
+                flipped = preview_pixmap[0].transformed(t, Qt.SmoothTransformation)
+                preview_pixmap[0] = flipped
+                preview_hflip[0] = False
+                preview_transforms[0] = 0
+                transformed = _apply_transforms(preview_pixmap[0])
+                scaled = transformed.scaled(preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                preview_label.setPixmap(scaled)
+
+        def on_rotate():
+            preview_transforms[0] = (preview_transforms[0] + 90) % 360
+            if preview_pixmap[0]:
+                transformed = _apply_transforms(preview_pixmap[0])
+                scaled = transformed.scaled(preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                preview_label.setPixmap(scaled)
+
+        def on_add():
+            if preview_pixmap[0]:
+                final = _apply_transforms(preview_pixmap[0])
+                self._replace_card(card_idx, final)
+                dlg.accept()
+
+        btn_crop.clicked.connect(on_crop)
+        btn_hflip.clicked.connect(on_hflip)
+        btn_vflip.clicked.connect(on_vflip)
+        btn_rotate.clicked.connect(on_rotate)
+        btn_add.clicked.connect(on_add)
+
+        _update_buttons(False)
+        btn_hflip.hide()
+        btn_vflip.hide()
+        btn_rotate.hide()
+        btn_add.setEnabled(False)
+
+        def on_resize(event):
+            if preview_pixmap[0]:
+                transformed = _apply_transforms(preview_pixmap[0])
+                scaled = transformed.scaled(preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                preview_label.setPixmap(scaled)
+            elif not original_pix.isNull():
+                overlay.set_display(original_pix, 1.0, 0, 0)
+                scaled = original_pix.scaled(overlay.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                sx = overlay.width() - scaled.width()
+                sy = overlay.height() - scaled.height()
+                overlay.set_display(original_pix, scaled.width() / original_pix.width(), sx // 2, sy // 2)
+
+        dlg.resizeEvent = on_resize
+        QTimer.singleShot(0, lambda: on_resize(None))
+        btn_close.setFocus()
+        dlg.exec()
+
+    def _perspective_crop(self, pixmap, points):
+        from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+        buf = QBuffer()
+        buf.open(QIODevice.ReadWrite)
+        pixmap.save(buf, "PNG")
+        buf.seek(0)
+        raw = buf.data().data()
+        buf.close()
+        arr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        h, w = arr.shape[:2]
+        src = np.array(points, dtype=np.float32)
+        s = src.sum(axis=1)
+        d = np.diff(src, axis=1).flatten()
+        ordered = np.array([
+            src[np.argmin(s)],
+            src[np.argmin(d)],
+            src[np.argmax(s)],
+            src[np.argmax(d)],
+        ], dtype=np.float32)
+        w1 = np.linalg.norm(ordered[0] - ordered[1])
+        w2 = np.linalg.norm(ordered[2] - ordered[3])
+        h1 = np.linalg.norm(ordered[0] - ordered[3])
+        h2 = np.linalg.norm(ordered[1] - ordered[2])
+        dst_w = int(max(w1, w2))
+        dst_h = int(max(h1, h2))
+        if dst_w < 10 or dst_h < 10:
+            return pixmap
+        dst = np.array([[0, 0], [dst_w - 1, 0], [dst_w - 1, dst_h - 1], [0, dst_h - 1]], dtype=np.float32)
+        M = cv2.getPerspectiveTransform(ordered, dst)
+        cropped_arr = cv2.warpPerspective(arr, M, (dst_w, dst_h))
+        cropped_arr = cv2.cvtColor(cropped_arr, cv2.COLOR_BGR2RGB)
+        ch = 3
+        h2, w2 = cropped_arr.shape[:2]
+        bytes_per_line = ch * w2
+        from PySide6.QtGui import QImage as QImg
+        qimg = QImg(cropped_arr.data.tobytes(), w2, h2, bytes_per_line, QImg.Format.Format_RGB888)
+        return QPixmap.fromImage(qimg)
+
+    def _replace_card(self, card_idx, new_pixmap):
+        if card_idx < 0 or card_idx >= len(self.cards):
+            return
+        item = self.cards[card_idx]
+        old_pos = item.pos()
+        old_scale = item._scale
+        old_rotation = item._rotation
+        old_snapped = item._snapped
+        old_pan_x = item._pan_x
+        old_pan_y = item._pan_y
+        old_original = item._original_pixmap
+        self.scene.removeItem(item)
+        new_item = IDCardItem(new_pixmap, index=card_idx)
+        new_item.on_dropped = self._on_card_dropped
+        new_item.on_double_clicked = self._show_original_image
+        new_item._original_pixmap = old_original
+        new_item.setPos(old_pos)
+        new_item._rotation = old_rotation
+        new_item._scale = old_scale
+        new_item._snapped = old_snapped
+        new_item._pan_x = old_pan_x
+        new_item._pan_y = old_pan_y
+        self.scene.addItem(new_item)
+        self.cards[card_idx] = new_item
 
 
 
@@ -2347,6 +2711,7 @@ class A4Editor(QWidget):
 
 
         item.on_dropped = self._on_card_dropped
+        item.on_double_clicked = self._show_original_image
 
 
 

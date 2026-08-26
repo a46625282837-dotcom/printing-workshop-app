@@ -83,7 +83,9 @@ def _update_last_seen():
 
 _DOWNLOAD_URL = os.environ.get("DOWNLOAD_URL", "https://a46625282837-dotcom.github.io/worsha-download/")
 
-_APP_VERSION = os.environ.get("APP_VERSION", "1.3.5")
+_APP_VERSION = os.environ.get("APP_VERSION", "1.4.0")
+_MAINTENANCE = os.environ.get("MAINTENANCE", "").lower() in ("1", "true", "yes")
+_MAINTENANCE_EXEMPT = ["n", "z"]
 
 
 @app.route("/api/app/version", methods=["GET"])
@@ -137,6 +139,8 @@ def api_login():
     data = request.get_json() or {}
     username = data.get("username", "").strip()
     password = data.get("password", "")
+    if _MAINTENANCE and username.lower() not in _MAINTENANCE_EXEMPT:
+        return jsonify({"error": "التطبيق تحت الصيانة خلال 4 ساعات القادمة. نعتذر، انتظرونا بالتحديثات الجديدة"}), 503
     if not username or not password:
         return jsonify({"error": "اسم المستخدم وكلمة المرور مطلوبان"}), 400
     if not verify_password(username, password):
@@ -186,6 +190,8 @@ def api_logout():
 def api_register():
     data = request.get_json() or {}
     username = data.get("username", "").strip()
+    if _MAINTENANCE and username.lower() not in _MAINTENANCE_EXEMPT:
+        return jsonify({"error": "التطبيق تحت الصيانة خلال 4 ساعات القادمة. نعتذر، انتظرونا بالتحديثات الجديدة"}), 503
     password = data.get("password", "").strip()
     shop_name = data.get("shop_name", "").strip()
     phone = data.get("phone", "").strip()
