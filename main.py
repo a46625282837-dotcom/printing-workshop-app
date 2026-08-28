@@ -71,6 +71,10 @@ APP_VERSION = "1.4.0"
 _GITHUB_REPO = "a46625282837-dotcom/printing-workshop-app"
 _DOWNLOAD_PAGE = "https://a46625282837-dotcom.github.io/worsha-download/"
 
+# Update popup is disabled: the developer shares new releases directly with
+# users by link. Set to True to re-enable the "update available" popup.
+ENABLE_UPDATE_CHECK = False
+
 
 def _check_for_update():
     try:
@@ -132,7 +136,7 @@ def main():
         app.setWindowIcon(icon)
     window = IDCardApp(use_api=use_api)
     window.show()
-    if frozen:
+    if frozen and ENABLE_UPDATE_CHECK:
         update = _check_for_update()
         if update:
             _notify_update(update)
