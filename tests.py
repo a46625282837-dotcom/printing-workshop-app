@@ -248,6 +248,130 @@ class TestCardSwap(unittest.TestCase):
         self.assertEqual(grid_pos(9), (110, 307))
         self.assertEqual(grid_pos(15), (110, 502))
 
+    def test_swap_uses_pre_drag_origin(self):
+        """When a card is dragged onto another, the dropped card's ORIGINAL
+        position is lost once it sits over the target (mouseReleaseEvent fires
+        on_dropped after the item has already moved). _swap_cards must therefore
+        use the captured _drag_origin (set on mousePress) to move the target card
+        to where the moved card came from — otherwise no visible swap happens."""
+        from ui.a4_editor import A4Editor
+        from ui.id_card_item import IDCardItem
+        import inspect
+
+        swap = inspect.getsource(A4Editor._swap_cards)
+        self.assertIn("_drag_origin", swap,
+                      "_swap_cards must use a._drag_origin (pre-drag position)")
+        self.assertNotIn("pos_a = a.pos()", swap,
+                         "pos_a must not be a.pos() — that is the already-dropped position")
+
+        init = inspect.getsource(IDCardItem.__init__)
+        self.assertIn("self._drag_origin = None", init,
+                      "IDCardItem must initialize _drag_origin")
+
+        press = inspect.getsource(IDCardItem.mousePressEvent)
+        self.assertIn("self._drag_origin = self.pos()", press,
+                      "mousePressEvent must capture the original position")
+
+    def test_swap_keeps_index_in_sync(self):
+        """After _swap_cards, each card's .index must equal its position in
+        self.cards. When cards are swapped, the UI captures card_item.index and
+        passes it to _replace_card for the double-click crop flow; a stale index
+        makes the crop overwrite the WRONG card (the double-clicked card keeps its
+        old image and the crop appears on the neighbour card)."""
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtGui import QPixmap
+        app = QApplication.instance() or QApplication([])
+        from ui.a4_editor import A4Editor
+
+        ed = A4Editor()
+        pm = QPixmap(120, 80)
+        pm.fill()
+        ed._place_card(pm)
+        ed._place_card(pm)
+        ed._place_card(pm)
+
+        a, b = ed.cards[0], ed.cards[2]
+        a._drag_origin = a.pos()
+        ed._swap_cards(a, b)
+        b._drag_origin = b.pos()
+        ed._swap_cards(b, ed.cards[1])
+
+        for item in ed.cards:
+            self.assertEqual(item.index, ed.cards.index(item),
+                             f"card index {item.index} != list position "
+                             f"{ed.cards.index(item)} after swap")
+            self.assertLess(item.index, len(ed.cards))
+
+
+class TestSessionPersistence(unittest.TestCase):
+    """Session must persist across app restarts until the user logs out manually.
+    The startup restore must NOT destroy the saved session when the server's auth
+    check returns an error (e.g. session_expired), otherwise the user is forced to
+    log in again on every launch."""
+
+    def test_check_auth_supports_suppress_expired(self):
+        """check_auth must accept suppress_expired and forward it as
+        _fire_session_expired so a startup check cannot wipe the saved session."""
+        from core import api_client
+        import unittest.mock as mock
+        with mock.patch.object(api_client, "_request", return_value=("data", None)) as m:
+            api_client.check_auth()
+            self.assertIs(m.call_args.kwargs.get("_fire_session_expired"), True,
+                          "default session check should still fire the expired callback")
+        with mock.patch.object(api_client, "_request", return_value=("data", None)) as m:
+            api_client.check_auth(suppress_expired=True)
+            self.assertIs(m.call_args.kwargs.get("_fire_session_expired"), False,
+                          "restore-time check must NOT fire the expired callback")
+
+    def test_api_check_auth_passes_suppress(self):
+        """database.api_check_auth must forward suppress_expired to api_client."""
+        from core import database
+        import unittest.mock as mock
+        with mock.patch("core.api_client.check_auth", return_value=("data", None)) as m:
+            database.api_check_auth()
+            self.assertEqual(m.call_args[1].get("suppress_expired"), False)
+        with mock.patch("core.api_client.check_auth", return_value=("data", None)) as m:
+            database.api_check_auth(suppress_expired=True)
+            self.assertEqual(m.call_args[1].get("suppress_expired"), True)
+
+    def test_restore_uses_suppress_expired(self):
+        """_try_restore_session must call api_check_auth with suppress_expired=True."""
+        from ui.main_window import MainWindow
+        import inspect
+        src = inspect.getsource(MainWindow._try_restore_session)
+        self.assertIn("api_check_auth(suppress_expired=True)", src,
+                      "restore must suppress the expired callback to keep the session")
+
+    def test_save_session_creates_missing_data_dir(self):
+        """_save_session must create DATA_DIR if it does not exist, otherwise the
+        session write silently fails in the frozen EXE (API mode) where init_db is
+        never called and the data folder is absent -> user must re-login every launch."""
+        import tempfile, os, json, unittest.mock as mock
+        from core import database
+        from ui.main_window import MainWindow
+        tmp = tempfile.mkdtemp()
+        try:
+            target = os.path.join(tmp, "data_does_not_exist")
+            self.assertFalse(os.path.exists(target))
+            fake = mock.Mock()
+            fake._username = "u"
+            fake._display_name = "d"
+            fake._is_admin = False
+            fake._subscription_required = False
+            fake._use_api = True
+            fake._session_path.side_effect = lambda: os.path.join(target, "session.json")
+            with mock.patch("core.api_client.get_token", return_value="realtoken123"), \
+                 mock.patch("core.api_client.get_token_id", return_value="tid"), \
+                 mock.patch.object(database, "DATA_DIR", target):
+                MainWindow._save_session(fake)
+            self.assertTrue(os.path.isdir(target), "DATA_DIR must be created before saving")
+            self.assertTrue(os.path.isfile(os.path.join(target, "session.json")))
+            with open(os.path.join(target, "session.json"), encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["token"], "realtoken123")
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 class TestPhotoProcessor(unittest.TestCase):
     def test_photo_px_size_35x45(self):

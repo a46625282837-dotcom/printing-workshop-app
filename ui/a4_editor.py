@@ -2852,7 +2852,7 @@ class A4Editor(QWidget):
 
 
 
-        pos_a = a.pos()
+        pos_a = a._drag_origin if a._drag_origin is not None else a.pos()
 
         pos_b = b.pos()
 
@@ -2866,6 +2866,8 @@ class A4Editor(QWidget):
 
         self.cards[i], self.cards[j] = self.cards[j], self.cards[i]
 
+        a.index = j
+        b.index = i
 
 
         logger.info("طع¾ظâ€¦ طع¾بدظظ¹ظâ€‍ اظâ€‍بطاظâ€ڑطع¾ظظ¹ظâ€  %d ظث† %d", i + 1, j + 1)

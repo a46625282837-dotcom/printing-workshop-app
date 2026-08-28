@@ -182,8 +182,8 @@ def register(username, password, shop_name, phone):
     return data, err
 
 
-def check_auth():
-    return _request("GET", "/api/auth/check")
+def check_auth(suppress_expired=False):
+    return _request("GET", "/api/auth/check", _fire_session_expired=not suppress_expired)
 
 
 def get_users():

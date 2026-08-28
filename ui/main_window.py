@@ -803,6 +803,8 @@ class MainWindow(QMainWindow):
             sess_data["mode"] = "api"
         else:
             sess_data["mode"] = "local"
+        from core.database import DATA_DIR
+        os.makedirs(DATA_DIR, exist_ok=True)
         with open(self._session_path(), "w", encoding="utf-8") as f:
             json.dump(sess_data, f)
 
@@ -850,7 +852,7 @@ class MainWindow(QMainWindow):
         api_client.set_token_id(sess.get("token_id"))
         api_client.set_username(username)
         from core.database import api_check_auth
-        qdata, qerr = api_check_auth()
+        qdata, qerr = api_check_auth(suppress_expired=True)
         if qerr:
             self._logged_in = True
             self._username = username

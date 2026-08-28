@@ -621,6 +621,95 @@ Fix: `_on_photo_ready` now sets `item._original_pixmap = qpix` so the bg-removed
 4. Log in as `ahmed` / `Aa511F511fa` → dashboard shows ALL users & subscriptions
 5. To update the app: rebuild exe → re-upload for download
 
+### v1.6.2 (2026-08-26) — Fix: Card swap doesn't move the target card
+
+**Problem:** In the ID card editor, dragging one card (via the ⤡ move handle) on top of another should swap their grid positions. The target card did NOT move to the dragged card's original slot — both cards ended up sharing the target's position (visually stacked, no swap).
+
+**Root cause:** `mouseReleaseEvent` calls `on_dropped(self)` only AFTER the drag has already moved the card `self` to the drop position. `_on_card_dropped` → `_swap_cards(a, b)` then computed `pos_a = a.pos()` — which at that point is the DROPPED position (already on top of `b`), not the original pre-drag position. So `b.setPos(pos_a)` moved `b` to the same spot as `a`, and no swap occurred.
+
+**Fix (2 changes):**
+1. `ui/id_card_item.py` — added `self._drag_origin = None` in `__init__`; set `self._drag_origin = self.pos()` in `mousePressEvent` (alongside `_drag_start`). Captures the card's original grid position before any movement.
+2. `ui/a4_editor.py` — `_swap_cards(a, b)` now uses `pos_a = a._drag_origin if a._drag_origin is not None else a.pos()` (the pre-drag position) instead of `a.pos()`, so the target card `b` moves to where the dragged card originally was.
+
+**Result:** Dragging card A onto card B now moves A to B's slot and B to A's original slot (true swap).
+
+**Files changed:** `ui/id_card_item.py`, `ui/a4_editor.py`, `tests.py` (new `test_swap_uses_pre_drag_origin`), `PROJECT_MAP.md`
+**Tests:** TestCardSwap 2 passed; relevant static/GUI test classes pass (full suite has pre-existing hang from unrelated networked/slow tests)
+
+### v1.6.3 (2026-08-26) — Fix: Session doesn't persist across app restarts
+
+**Problem:** User had to log in every time they closed and reopened the app, even though login should persist until they log out manually.
+
+**Root cause:** On startup, `_try_restore_session()` calls `api_check_auth()` → `api_client.check_auth()` → `_request(...)` with the default `_fire_session_expired=True`. If the server responded with `session_expired: true` (or any auth error), `_request` fired the registered `_on_session_expired` callback, which called `_clear_session()` → **deleted `session.json`** and reset the UI to the login screen — before `_try_restore_session`'s own `if qerr:` fallback could restore the user locally. So the saved session was destroyed on every launch that couldn't verify the token, forcing a re-login.
+
+**Fix (3 files, pass-through of a `suppress_expired` flag):**
+1. `core/api_client.py` — `check_auth(suppress_expired=False)` now forwards `_fire_session_expired=not suppress_expired` to `_request`.
+2. `core/database.py` — `api_check_auth(suppress_expired=False)` forwards to `api_client.check_auth`.
+3. `ui/main_window.py` — `_try_restore_session()` calls `api_check_auth(suppress_expired=True)` so the startup check can NEVER fire the session-expired callback and destroy the saved session. The existing `if qerr:` branch restores the user locally and the session file survives.
+
+Other call sites (`_refresh_user_data`, `_auto_refresh_data`, `_login_submit`) keep the default (callback active) so genuine mid-session expiry still logs the user out.
+
+**Result (verified end-to-end):** On startup with an auth error, the user is restored (`logged_in=True`) and `session.json` is preserved — the login persists until the user explicitly logs out.
+
+**Files changed:** `core/api_client.py`, `core/database.py`, `ui/main_window.py`, `tests.py` (new `TestSessionPersistence`), `PROJECT_MAP.md`
+**Tests:** `TestSessionPersistence` 3 passed; `TestCardSwap`, `TestPhotoItem`, `TestSliderGroup`, `TestImageUtils` pass (no regression)
+
+### v1.6.4 (2026-08-27) — Fix: Crop after swapping cards overwrites the wrong card
+
+**Problem:** After swapping two cards in the ID card editor, double-clicking a card to crop it and pressing "إضافة" did not update the double-clicked card — the OLD image stayed while the crop appeared on the neighbouring card (the user perceived it as "the crop was added alongside, not replacing").
+
+**Root cause:** `_place_card()` assigns each card `index = len(self.cards)` at creation, but `_swap_cards(a, b)` swapped the entries in `self.cards` WITHOUT updating `a.index` / `b.index`. So after a swap, `item.index` no longer equaled the card's position in `self.cards`. The double-click crop flow captures `card_idx = card_item.index` (in `_show_original_image`) and passes it to `_replace_card(card_idx, final)`, which then replaced `self.cards[card_idx]` — a DIFFERENT card than the one that was double-clicked.
+
+**Fix (1 change):**
+1. `ui/a4_editor.py` — in `_swap_cards`, after swapping list entries, sync each card's index to its new list position: `a.index = j; b.index = i` (where `i`, `j` are the pre-swap positions captured just before the list swap).
+
+**Result (verified end-to-end):** After a swap, `item.index` always matches the list position, so double-clicking a card crops THAT card and replaces it in place (list length unchanged, no leftover duplicate/overwrite of a neighbour).
+
+**Files changed:** `ui/a4_editor.py`, `tests.py` (new `test_swap_keeps_index_in_sync`), `PROJECT_MAP.md`
+**Tests:** `TestCardSwap::test_swap_keeps_index_in_sync` (TDD red→green); all 16 relevant tests pass (no regression)
+
+### v1.6.5 (2026-08-27) — Lighten the app & shrink the EXE (big optimization)
+
+**Goal:** The app felt heavy for users and the frozen EXE was very large (386 MB). Make it lighter (faster launch/extract, less RAM/disk) and much smaller, WITHOUT touching any section, feature, or service.
+
+**Impact analysis (verified before changing anything):**
+- The heavy size drivers were `torch` (~494 MB in site-packages, ~93 MB in the EXE), `cv2` (~65 MB incl. two FFmpeg video DLLs), `mediapipe` (~19 MB), `scipy` (~20 MB), `numba`/`llvmlite` (~38 MB), `matplotlib`.
+- **torch/torchvision/gfpgan/realesrgan/basicsr/facexlib are dead:** `core/ai_enhance.py` is their only importer, its `enhance_image()` is **never called anywhere in the app**, and these packages are not even installed (they always `ImportError`). The real photo-enhancement path uses `mediapipe.solutions.face_mesh` + OpenCV + numpy (kept). Removing torch is 100% safe.
+- **scipy** is referenced only in test files/docstrings — never loaded at runtime.
+- **numba/llvmlite** are used only by numpy type-checking stubs and by torch (both dead paths).
+- **matplotlib** is pulled only by `mediapipe.tasks...drawing_utils` — the app uses classic `mediapipe.solutions` only.
+- **OpenCV FFmpeg videoIO DLLs** (`opencv_videoio_ffmpeg*_64.dll`, ~25 MB) — the app is image-only; verified no `VideoCapture`/`VideoWriter`/videoio usage anywhere.
+- `onnxruntime` is KEPT — it powers the working AI background-removal fallback chain (`rembg` → `onnxruntime` → `grabCut`).
+
+**Changes (build-level only, `WorshaApp.spec` — no runtime feature code touched):**
+1. Moved the dead deps into an `excludes=` list: `torch, torchvision, gfpgan, realesrgan, basicsr, facexlib, scipy, numba, llvmlite, matplotlib, pytest, IPython`.
+2. Trimmed `hiddenimports`: removed `torch, torchvision, gfpgan, realesrgan, basicsr, facexlib, scipy, scipy.stats, scipy.special, mediapipe.tasks...`; keep `mediapipe.solutions` (used) + `cv2` + `onnxruntime` + Qt Svg.
+3. Filtered cv2 data + binaries to drop the `videoio_ffmpeg` DLLs.
+
+**Verification (no regression):**
+- Import-blocker test: with torch/scipy/numba/matplotlib/etc. blocked, the full app chain (`main`, MainWindow, all editors, photo_processor, id_extractor) imports cleanly and `ai_enhance.is_available()` correctly returns False (graceful fallback).
+- All relevant tests pass with the heavy libs blocked: **31 passed** (TestCardSwap, TestSessionPersistence, TestPhotoItem, TestSliderGroup, TestImageUtils, TestRefreshButton, TestPhotoProcessor).
+- EXE launch smoke-test: process stays alive (no import crash).
+- `dist/WorshaApp.exe` on-disk: **386.3 MB → 146.7 MB (−62%)**. torch/scipy/numba/matplotlib/gfpgan absent; cv2/mediapipe/onnxruntime/PySide6/numpy preserved.
+
+**Files changed:** `WorshaApp.spec`, `PROJECT_MAP.md`
+**Tests:** 31 relevant tests pass (no regression)
+
+### v1.6.6 (2026-08-27) — Fix: EXE did NOT persist login while the source did
+
+**Problem:** Running the source (`python main.py`, "Python logo") remembered the user's login, but the frozen EXE (`dist/WorshaApp.exe`) forced a re-login on every launch. This contradicted the v1.6.3 session fix, which worked in source only.
+
+**Root cause:** The session is written to `DATA_DIR/session.json`. In the EXE (frozen), `DATA_DIR` = `<exe_dir>/data` (e.g. `dist/data`). In **API mode** `init_db()` is never called, and that `os.makedirs(DATA_DIR)` lived ONLY inside `init_db()`. So on the EXE the `data` folder was never created, and `_save_session()`'s `open(".../data/session.json", "w")` silently failed (FileNotFoundError) → login never persisted. In source mode the `data/` folder already existed (from earlier local/db runs), which is why source kept working.
+
+**Why source vs EXE differed:** source reuses the existing `data/` folder; the EXE, in a fresh `dist` with no `data/`, never created it.
+
+**Fix (1 line):** `ui/main_window.py` `_save_session()` — add `os.makedirs(DATA_DIR, exist_ok=True)` right before writing `session.json`, so the data folder is created on first login regardless of mode.
+
+**Result (verified):** New regression test `TestSessionPersistence::test_save_session_creates_missing_data_dir` (red→green) proves `_save_session` creates `DATA_DIR` when missing and writes the session. The rebuilt EXE (same 146.7 MB build) carries this fix; after login it now creates `<exe_dir>/data` and persists `session.json`, restoring login on the next launch.
+
+**Files changed:** `ui/main_window.py`, `tests.py`, `PROJECT_MAP.md`
+**Tests:** new regression test passes; 51 relevant client tests pass (the only failures are pre-existing env ones: `backend.app` needs `flask`, not installed in the client env — unrelated)
+
 ## Deploy (Local / Standalone)
 Copy the exe to any Windows PC and run it.
 No Python required. Data is saved next to the exe in `data/` folder.

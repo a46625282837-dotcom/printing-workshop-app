@@ -20,6 +20,7 @@ class IDCardItem(QGraphicsPixmapItem):
         self._panning = False
         self._pan_start = None
         self._drag_start = None
+        self._drag_origin = None
         self._move_hold = False
         self.on_dropped = None
         self.on_double_clicked = None
@@ -213,6 +214,7 @@ class IDCardItem(QGraphicsPixmapItem):
 
     def mousePressEvent(self, event):
         self._drag_start = self.pos()
+        self._drag_origin = self.pos()
         if event.button() == Qt.LeftButton:
             if self._rotate_rect.contains(event.pos()):
                 self.set_item_rotation((self._rotation + 90) % 360)

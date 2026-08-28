@@ -309,9 +309,9 @@ def api_upload_pixmap(pixmap_bytes):
     return api_client.upload_pixmap(pixmap_bytes)
 
 
-def api_check_auth():
+def api_check_auth(suppress_expired=False):
     from . import api_client
-    return api_client.check_auth()
+    return api_client.check_auth(suppress_expired=suppress_expired)
 
 
 def api_get_subscriptions(username):
