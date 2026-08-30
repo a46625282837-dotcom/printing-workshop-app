@@ -6,12 +6,13 @@ from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QVBoxLayout,
                                QMessageBox, QLabel, QGraphicsPixmapItem,
                                QGraphicsItem, QGraphicsRectItem, QDialog, QStyle,
                                QMenu, QInputDialog, QComboBox, QProgressBar,
+                               QSlider, QSplitter, QGroupBox, QGridLayout,
                                QSlider, QSplitter, QGroupBox, QGridLayout)
 from PySide6.QtCore import Qt, Signal, QRectF, QSettings, QThread, QEvent, QBuffer, QByteArray, QIODevice, QTimer, QTime
 from PySide6.QtGui import QPixmap, QImage, QPen, QColor, QBrush, QPainter, QShortcut, QKeySequence, QPainterPath, QAction, QPageSize
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog
 from PIL import Image
-from core.printer import print_scene, get_selected_printer_name, set_printer_name, set_last_paper_type
+from core.printer import print_scene, get_selected_printer_name, set_printer_name, set_last_paper_type, NO_PRINT_KEY
 from ui.a4_editor import PrintSetupDialog, A4_W, A4_H, MARGIN
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,6 @@ PHOTO_SIZES = {
     "طول 4 سم وعرض 3 سم": (30, 40),
 }
 GAP = 5
-
 
 class PhotoItem(QGraphicsPixmapItem):
     def __init__(self, pixmap, pw, ph, index=0, parent=None):
@@ -36,6 +36,7 @@ class PhotoItem(QGraphicsPixmapItem):
         self._processing = False
         self._spin_angle = 0
         self._spin_timer = None
+        self._group = None
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
 
@@ -79,16 +80,20 @@ class PhotoItem(QGraphicsPixmapItem):
             painter.translate(self._pw / 2, self._ph / 2)
             if self._rotation:
                 painter.rotate(self._rotation)
-            if self._rotation in (90, 270):
-                scale = min(self._ph / source.width(), self._pw / source.height(), 1.0)
+            r = self._rotation % 360
+            if r in (90, 270):
+                scale = min(self._ph / source.width(), self._pw / source.height())
             else:
-                scale = min(self._pw / source.width(), self._ph / source.height(), 1.0)
-            dw = source.width() * scale
-            dh = source.height() * scale
+                scale = min(self._pw / source.width(), self._ph / source.height())
+            dw = max(1, int(source.width() * scale))
+            dh = max(1, int(source.height() * scale))
+            painter.setRenderHint(QPainter.SmoothPixmapTransform)
             painter.drawPixmap(QRectF(-dw / 2, -dh / 2, dw, dh), source, source.rect())
             painter.restore()
         selected = bool(option.state & QStyle.State_Selected)
-        if selected:
+        scene = self.scene()
+        printing = bool(getattr(scene, "_printing", False)) if scene is not None else False
+        if selected and not printing:
             painter.setPen(QPen(QColor("#1a73e8"), 4))
             painter.setBrush(QBrush(QColor(26, 115, 232, 20)))
             painter.drawRect(QRectF(1, 1, self._pw - 2, self._ph - 2))
@@ -112,10 +117,16 @@ class PhotoItem(QGraphicsPixmapItem):
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
+        base = self.pixmap()
+        if base.isNull():
+            base = self._original_pixmap
+        cr = self._crop_rect
+        if base.size() != self._original_pixmap.size():
+            cr = None
         dialog = PhotoCropDialog(
-            self._original_pixmap, None,
+            base, None,
             slot_size=(self._pw, self._ph),
-            crop_rect=self._crop_rect,
+            crop_rect=cr,
             saved_settings=self._adjust_settings,
         )
         if dialog.exec() != QDialog.Accepted:
@@ -130,8 +141,9 @@ class PhotoItem(QGraphicsPixmapItem):
             logger.info("تم تحسين الصورة: %s",
                          {k: v for k, v in settings.items() if v > 0} if isinstance(settings, dict) else settings)
 
-
 class PhotoGraphicsView(QGraphicsView):
+    digit_pressed = Signal(int)
+
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
         self.setAcceptDrops(True)
@@ -139,6 +151,17 @@ class PhotoGraphicsView(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.RubberBandDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
+
+    def keyPressEvent(self, event):
+        digits = {Qt.Key_0: 10, Qt.Key_1: 1, Qt.Key_2: 2, Qt.Key_3: 3, Qt.Key_4: 4,
+                  Qt.Key_5: 5, Qt.Key_6: 6, Qt.Key_7: 7, Qt.Key_8: 8, Qt.Key_9: 9}
+        key = event.key()
+        if event.modifiers() == Qt.NoModifier and key in digits:
+            self.digit_pressed.emit(digits[key])
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -175,14 +198,12 @@ class PhotoGraphicsView(QGraphicsView):
         elif action == act_dup:
             count, ok = QInputDialog.getInt(self, "تكرار الصورة", "عدد مرات التكرار:", 2, 1, 999)
             if ok:
-                pixmap = item.pixmap()
-                for _ in range(count):
-                    self.parent()._place_photo(QPixmap(pixmap))
-
+                editor = self.parent()
+                editor._push_undo()
+                editor._add_copies(item, count)
 
     def mouseDoubleClickEvent(self, event):
         super().mouseDoubleClickEvent(event)
-
 
 class _SliderGroup(QWidget):
     """A labeled slider with value display and range 0-100."""
@@ -215,7 +236,6 @@ class _SliderGroup(QWidget):
             self.slider.setValue(0)
             return True
         return super().eventFilter(obj, event)
-
 
 class _ControlPanel(QWidget):
     anyValueChanged = Signal()
@@ -275,8 +295,6 @@ class _ControlPanel(QWidget):
     def settings(self) -> dict:
         return {key: w.slider.value() for key, w in self._groups.items()}
 
-
-
 class PhotoCropDialog(QDialog):
     def __init__(self, pixmap: QPixmap, parent=None, slot_size=None, crop_rect=None, saved_settings=None):
         super().__init__(parent)
@@ -292,6 +310,12 @@ class PhotoCropDialog(QDialog):
         self.crop_rect = crop_rect
         self._sliders = {}
         self._saved_settings = saved_settings or {}
+        self._poly_mode = False
+        self._poly_points = []
+        self._poly_items = []
+        self._btn_poly_crop = None
+        self._btn_poly_clear = None
+        self._btn_poly_preview = None
         self._setup_ui()
         self._restore_settings()
         self._add_shortcuts()
@@ -396,22 +420,52 @@ class PhotoCropDialog(QDialog):
 
         btn_bar = QHBoxLayout()
         btn_bar.setContentsMargins(8, 6, 8, 6)
-        for text, slot, style in [
-            ("تطبيق", self._apply, "background:#0d904f;color:#fff;border-radius:4px;padding:6px 20px;"),
-            ("إلغاء", self.reject, "background:#555;color:#eee;border-radius:4px;padding:6px 20px;"),
-        ]:
-            btn = QPushButton(text)
-            btn.setStyleSheet(style)
-            btn.clicked.connect(slot)
-            btn_bar.addWidget(btn)
+
+        self._btn_poly_crop = QPushButton("✂ قص")
+        self._btn_poly_crop.setStyleSheet(
+            "QPushButton{background:#1565c0;color:#fff;border-radius:4px;padding:6px 16px;font-weight:bold;}"
+            "QPushButton:hover{background:#1976d2;}"
+        )
+        self._btn_poly_crop.clicked.connect(self._enter_poly_mode)
+        btn_bar.addWidget(self._btn_poly_crop)
+
+        self._btn_poly_clear = QPushButton("مسح النقاط")
+        self._btn_poly_clear.setStyleSheet(
+            "QPushButton{background:#e67e22;color:#fff;border-radius:4px;padding:6px 14px;}"
+            "QPushButton:hover{background:#f39c12;}"
+        )
+        self._btn_poly_clear.clicked.connect(self._poly_clear)
+        self._btn_poly_clear.setEnabled(False)
+        btn_bar.addWidget(self._btn_poly_clear)
+
+        self._btn_poly_preview = QPushButton("معاينة")
+        self._btn_poly_preview.setStyleSheet(
+            "QPushButton{background:#2196F3;color:#fff;border-radius:4px;padding:6px 16px;font-weight:bold;}"
+            "QPushButton:hover{background:#1976D2;}"
+        )
+        self._btn_poly_preview.clicked.connect(self._preview_poly)
+        self._btn_poly_preview.setEnabled(False)
+        btn_bar.addWidget(self._btn_poly_preview)
+
+        btn_bar.addStretch()
+
+        btn_apply = QPushButton("تطبيق")
+        btn_apply.setStyleSheet("background:#0d904f;color:#fff;border-radius:4px;padding:6px 20px;")
+        btn_apply.clicked.connect(self._final_apply)
+        btn_bar.addWidget(btn_apply)
+
+        btn_cancel = QPushButton("إلغاء")
+        btn_cancel.setStyleSheet("background:#555;color:#eee;border-radius:4px;padding:6px 20px;")
+        btn_cancel.clicked.connect(self.reject)
+        btn_bar.addWidget(btn_cancel)
         main.addLayout(btn_bar)
 
-        self.resize(820, 640)
-        self.setMinimumSize(540, 420)
+        self.resize(860, 740)
+        self.setMinimumSize(540, 560)
 
     def _add_shortcuts(self):
-        QShortcut(QKeySequence("Return"), self, self._apply)
-        QShortcut(QKeySequence("Enter"), self, self._apply)
+        QShortcut(QKeySequence("Return"), self, self._final_apply)
+        QShortcut(QKeySequence("Enter"), self, self._final_apply)
         QShortcut(QKeySequence("Escape"), self, self.reject)
 
     def _restore_settings(self):
@@ -495,6 +549,12 @@ class PhotoCropDialog(QDialog):
         self._debounce_timer.start()
 
     def _reset_to_original(self):
+        self._poly_mode = False
+        self._poly_points.clear()
+        self._clear_poly_items()
+        self.result_pixmap = None
+        self.view.viewport().unsetCursor()
+        self.view.setDragMode(QGraphicsView.ScrollHandDrag)
         self._current = self._original
         self._orig_bgr = None
         self._cached_face_mask = None
@@ -506,6 +566,15 @@ class PhotoCropDialog(QDialog):
         self._zoom_fit()
         for sl in self._sliders.values():
             sl.slider.setValue(0)
+        for sl in self._sliders.values():
+            sl.setEnabled(True)
+        if self._btn_poly_crop is not None:
+            self._btn_poly_crop.setStyleSheet(
+                "QPushButton{background:#1565c0;color:#fff;border-radius:4px;padding:6px 16px;font-weight:bold;}"
+                "QPushButton:hover{background:#1976d2;}"
+            )
+            self._btn_poly_clear.setEnabled(False)
+            self._btn_poly_preview.setEnabled(False)
         self._lbl_status.setText("تمت إعادة الصورة الأصلية")
 
     def _apply_adjustments(self):
@@ -719,6 +788,157 @@ class PhotoCropDialog(QDialog):
         self.strength_value = 0
         self.accept()
 
+    def _recreate_scene(self, pixmap):
+        self.scene.clear()
+        self._poly_items.clear()
+        self._pixmap_item = self.scene.addPixmap(pixmap)
+        self._overlay = _CropOverlay(self.scene, QRectF(self._pixmap_item.pos(), self._pixmap_item.boundingRect().size()))
+        if self.crop_rect:
+            self._overlay.set_rect(QRectF(*self.crop_rect))
+
+    def _enter_poly_mode(self):
+        self._poly_mode = True
+        self._poly_points.clear()
+        self._clear_poly_items()
+        self.result_pixmap = None
+        self._save_crop_from_overlay()
+        self._recreate_scene(self._current)
+        self._zoom_fit()
+        self._btn_poly_crop.setStyleSheet(
+            "QPushButton{background:#0d47a1;color:#fff;border-radius:4px;padding:6px 16px;font-weight:bold;}"
+            "QPushButton:hover{background:#1565c0;}"
+        )
+        self._btn_poly_clear.setEnabled(False)
+        self._btn_poly_preview.setEnabled(False)
+        self._lbl_status.setText("انقر نقاطاً متعددة على الصورة — الخط يتصل بين النقرات، ثم اضغط «معاينة»")
+        for s in self._sliders.values():
+            s.setEnabled(False)
+        self.view.setDragMode(QGraphicsView.NoDrag)
+        self.view.viewport().setCursor(Qt.CrossCursor)
+
+    def _poly_clear(self):
+        self._poly_points.clear()
+        self._clear_poly_items()
+        self.result_pixmap = None
+        self._update_poly_buttons()
+        self._lbl_status.setText("النقاط: 0 — انقر نقاطاً ثم اضغط «معاينة»")
+
+    def _clear_poly_items(self):
+        for it in self._poly_items:
+            try:
+                self.scene.removeItem(it)
+            except RuntimeError:
+                pass
+        self._poly_items.clear()
+
+    def _add_poly_point(self, scene_pos):
+        from PySide6.QtCore import QPointF
+        w = self._current.width()
+        h = self._current.height()
+        x = max(0.0, min(float(w), scene_pos.x()))
+        y = max(0.0, min(float(h), scene_pos.y()))
+        pt = QPointF(x, y)
+        if self._poly_points:
+            last = self._poly_points[-1]
+            if (pt - last).manhattanLength() < 4.0:
+                return
+        self._poly_points.append(pt)
+        marker = self.scene.addEllipse(x - 4, y - 4, 8, 8,
+                                       QPen(QColor("#00ff00")), QBrush(QColor("#00ff00")))
+        marker.setZValue(20)
+        self._poly_items.append(marker)
+        if len(self._poly_points) > 1:
+            prev = self._poly_points[-2]
+            line = self.scene.addLine(prev.x(), prev.y(), x, y,
+                                      QPen(QColor("#00ff00"), 2))
+            line.setZValue(19)
+            self._poly_items.append(line)
+        self._update_poly_buttons()
+        self._lbl_status.setText(f"النقاط: {len(self._poly_points)} — اضغط «معاينة» عند الانتهاء")
+
+    def _update_poly_buttons(self):
+        n = len(self._poly_points)
+        self._btn_poly_clear.setEnabled(n > 0)
+        self._btn_poly_preview.setEnabled(n >= 3 or self.result_pixmap is not None)
+
+    def _preview_poly(self):
+        if not self._poly_mode:
+            return
+        if self.result_pixmap is None:
+            if len(self._poly_points) < 3:
+                self._lbl_status.setText("حدد 3 نقاط على الأقل ثم اضغط «معاينة»")
+                return
+            cropped = self._polygon_crop(self._current, self._poly_points)
+            if cropped is None or cropped.isNull():
+                self._lbl_status.setText("فشل القص، أعد المحاولة")
+                return
+            self.result_pixmap = cropped
+        self._clear_poly_items()
+        try:
+            self.scene.removeItem(self._pixmap_item)
+        except RuntimeError:
+            pass
+        self._pixmap_item = self.scene.addPixmap(self.result_pixmap)
+        if self._overlay:
+            self._overlay.set_visible(False)
+        self._zoom_fit()
+        self._lbl_status.setText("تم قص الصورة — اضغط «تطبيق» للإضافة أو «قص» لإعادة التحديد")
+        self._update_poly_buttons()
+
+    def _polygon_crop(self, pixmap, points):
+        import cv2
+        from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.WriteOnly)
+        pixmap.toImage().save(buf, "PNG")
+        buf.close()
+        raw = bytes(ba.data())
+        arr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        if arr is None:
+            return None
+        h, w = arr.shape[:2]
+        pts = np.array([(int(max(0, min(w - 1, p.x()))), int(max(0, min(h - 1, p.y())))) for p in points],
+                       dtype=np.int32).reshape((-1, 1, 2))
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(mask, [pts], 255)
+        rx, ry, rw, rh = self._effective_crop_rect(w, h)
+        x2r, y2r = rx + rw - 1, ry + rh - 1
+        region = arr[ry:y2r + 1, rx:x2r + 1]
+        rm = mask[ry:y2r + 1, rx:x2r + 1]
+        out = region.copy()
+        out[rm == 0] = 255
+        rgb = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
+        qimg = QImage(rgb.data, rw, rh, 3 * rw, QImage.Format.Format_RGB888)
+        return QPixmap.fromImage(qimg.copy())
+
+    def _effective_crop_rect(self, w, h):
+        rx, ry, rw, rh = 0, 0, w, h
+        cr = self.crop_rect
+        if cr and len(cr) == 4:
+            rx, ry, rw, rh = [int(round(float(v))) for v in cr]
+        rx = max(0, min(w - 2, rx))
+        ry = max(0, min(h - 2, ry))
+        rw = max(2, min(w - rx, rw))
+        rh = max(2, min(h - ry, rh))
+        return (rx, ry, rw, rh)
+
+    def _final_apply(self):
+        if self._poly_mode:
+            if self.result_pixmap is None:
+                self._preview_poly()
+                if self.result_pixmap is None:
+                    self._lbl_status.setText("حدد 3 نقاط على الأقل ثم اضغط «معاينة»")
+                    return
+            self._clear_poly_items()
+            if self._overlay:
+                self._overlay.set_visible(True)
+            self._poly_mode = False
+            self.view.setDragMode(QGraphicsView.ScrollHandDrag)
+            self.view.viewport().unsetCursor()
+            self.accept()
+            return
+        self._apply()
 
 class _CropOverlay:
     EDGE_NONE = 0
@@ -779,6 +999,13 @@ class _CropOverlay:
         self._rect = r
         self._update()
 
+    def set_visible(self, visible):
+        self._border.setVisible(visible)
+        for it in self._dim_items:
+            it.setVisible(visible)
+        for it in self._handles:
+            it.setVisible(visible)
+
     def rect(self):
         return QRectF(self._rect)
 
@@ -813,7 +1040,6 @@ class _CropOverlay:
             return Qt.SizeHorCursor
         return Qt.ArrowCursor
 
-
 class _CropView(QGraphicsView):
     def __init__(self, scene, dialog):
         super().__init__(scene)
@@ -827,6 +1053,10 @@ class _CropView(QGraphicsView):
 
     def mousePressEvent(self, event):
         dlg = self._dialog
+        if dlg._poly_mode:
+            if event.button() == Qt.LeftButton:
+                dlg._add_poly_point(self.mapToScene(event.pos()))
+            return
         if event.button() == Qt.LeftButton and dlg._overlay:
             scene_pos = self.mapToScene(event.pos())
             edges = dlg._overlay.hit_test(scene_pos)
@@ -839,6 +1069,11 @@ class _CropView(QGraphicsView):
     def mouseMoveEvent(self, event):
         dlg = self._dialog
         scene_pos = self.mapToScene(event.pos())
+
+        if dlg._poly_mode:
+            self.viewport().setCursor(Qt.CrossCursor)
+            super().mouseMoveEvent(event)
+            return
 
         if self._drag_edge:
             r = QRectF(self._drag_rect)
@@ -866,7 +1101,6 @@ class _CropView(QGraphicsView):
             self._drag_rect = None
             return
         super().mouseReleaseEvent(event)
-
 
 class PhotoProcessingThread(QThread):
     photo_ready = Signal(bytes, int)
@@ -919,7 +1153,6 @@ class PhotoProcessingThread(QThread):
                 if data:
                     self.photo_ready.emit(data, idx)
         self.finished_all.emit()
-
 
 class PhotoEditor(QWidget):
     go_back = Signal()
@@ -1004,6 +1237,7 @@ class PhotoEditor(QWidget):
         self.scene.setSceneRect(0, 0, A4_W, A4_H)
         self._draw_page_area(0)
         self.view = PhotoGraphicsView(self.scene, self)
+        self.view.digit_pressed.connect(self._set_photo_count)
         layout.addWidget(self.view)
         self._apply_default_zoom()
 
@@ -1087,7 +1321,9 @@ class PhotoEditor(QWidget):
 
     def _draw_page_area(self, page_index):
         y0 = page_index * A4_H
-        self.scene.addRect(0, y0, A4_W, A4_H, QPen(Qt.NoPen), QBrush(Qt.white)).setZValue(-1)
+        page_rect = self.scene.addRect(0, y0, A4_W, A4_H, QPen(Qt.NoPen), QBrush(Qt.white))
+        page_rect.setZValue(-1)
+        page_rect.setData(NO_PRINT_KEY, True)
         pen = QPen(QColor(200, 200, 200, 60), 0.3, Qt.DashLine)
         pw, ph = self._pw(), self._ph()
         cols = self._cols()
@@ -1095,7 +1331,8 @@ class PhotoEditor(QWidget):
         for col in range(cols):
             y = y0 + MARGIN
             while y + ph <= y0 + A4_H - MARGIN:
-                self.scene.addRect(x, y, pw, ph, pen)
+                guide = self.scene.addRect(x, y, pw, ph, pen)
+                guide.setData(NO_PRINT_KEY, True)
                 y += ph + GAP
             x += pw + GAP
 
@@ -1273,10 +1510,80 @@ class PhotoEditor(QWidget):
                 if not ok:
                     return
                 self._push_undo()
-                pixmap = item.pixmap()
-                for _ in range(count):
-                    self._place_photo(QPixmap(pixmap))
+                self._add_copies(item, count)
                 return
+
+    def _set_photo_count(self, count):
+        selected = [it for it in self.photos if it.isSelected()]
+        original = next((it for it in selected if isinstance(it, PhotoItem)), None)
+        if original is None:
+            return
+        group = original._group
+        if group is None:
+            group = [original]
+            original._group = group
+        current = len(group)
+        if count == current:
+            return
+        self._push_undo()
+        if count > current:
+            self._add_copies(original, count - current)
+        else:
+            for item in group[count:]:
+                self.scene.removeItem(item)
+                if item in self.photos:
+                    self.photos.remove(item)
+            del group[count:]
+        self.scene.clearSelection()
+        leader = group[0]
+        leader.setSelected(True)
+        self.view.centerOn(leader)
+        logger.info("عدد نسخ الصورة أصبح %d", count)
+
+    def _slot_of(self, item):
+        pw, ph = self._pw(), self._ph()
+        x, y = item.pos().x(), item.pos().y()
+        page = max(0, int(y // A4_H))
+        local_y = y - page * A4_H
+        col = max(0, int(round((x - MARGIN) / (pw + GAP))))
+        row = max(0, int(round((local_y - MARGIN) / (ph + GAP))))
+        return page * self._per_page() + row * self._cols() + col
+
+    def _duplicate_item(self, original, slot_index=None):
+        group = original._group
+        if group is None:
+            group = [original]
+            original._group = group
+        item = PhotoItem(QPixmap(original.pixmap()), self._pw(), self._ph(), index=len(self.photos))
+        item._original_pixmap = original._original_pixmap
+        item._crop_rect = original._crop_rect
+        item._adjust_settings = dict(original._adjust_settings) if original._adjust_settings else {}
+        item._group = group
+        if slot_index is None:
+            slot_index = len(self.photos)
+        item.setPos(*self._grid_pos(slot_index))
+        item.set_item_rotation(original.item_rotation())
+        self.scene.addItem(item)
+        self.photos.append(item)
+        group.append(item)
+        return item
+
+    def _add_copies(self, original, extra):
+        group = original._group
+        if group is None:
+            group = [original]
+            original._group = group
+        used = {self._slot_of(it) for it in self.photos}
+        start = self._slot_of(original)
+        k = start + 1
+        added = 0
+        while added < extra:
+            if k not in used:
+                self._ensure_page(k // self._per_page())
+                self._duplicate_item(original, k)
+                used.add(k)
+                added += 1
+            k += 1
 
     def _rotate_selected(self):
         items = self.scene.selectedItems()
@@ -1327,9 +1634,13 @@ class PhotoEditor(QWidget):
             selected = self.scene.selectedItems()
             for item in selected:
                 item.setSelected(False)
-            bg_items = [it for it in self.scene.items() if it.zValue() < 0]
+            bg_items = [it for it in self.scene.items() if it.data(NO_PRINT_KEY) and it.isVisible()]
             for it in bg_items:
                 it.setVisible(False)
+            try:
+                self.scene._printing = True
+            except Exception:
+                pass
             printer = QPrinter()
             printer.setOutputFormat(QPrinter.PdfFormat)
             printer.setOutputFileName(path)
@@ -1341,6 +1652,10 @@ class PhotoEditor(QWidget):
                 QMessageBox.warning(self, "خطأ", "فشل بدء رسم الحفظ PDF")
                 for it in bg_items:
                     it.setVisible(True)
+                try:
+                    self.scene._printing = False
+                except Exception:
+                    pass
                 return
             try:
                 page_rect = printer.pageRect(QPrinter.Millimeter)
@@ -1364,6 +1679,10 @@ class PhotoEditor(QWidget):
                 painter.end()
                 for it in bg_items:
                     it.setVisible(True)
+                try:
+                    self.scene._printing = False
+                except Exception:
+                    pass
             for item in selected:
                 item.setSelected(True)
 

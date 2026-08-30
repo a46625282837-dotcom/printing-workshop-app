@@ -4,7 +4,7 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 CARD_WIDTH_MM = 95
-CARD_HEIGHT_MM = 60
+CARD_HEIGHT_MM = 55
 TARGET_DPI = 600
 
 

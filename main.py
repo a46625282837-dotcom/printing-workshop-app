@@ -67,51 +67,37 @@ def _register_wwk_extension():
         logging.warning("فشل تسجيل امتداد .wwk: %s", e)
 
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "2.1.0"
 _GITHUB_REPO = "a46625282837-dotcom/printing-workshop-app"
 _DOWNLOAD_PAGE = "https://a46625282837-dotcom.github.io/worsha-download/"
 
-# Update popup is disabled: the developer shares new releases directly with
-# users by link. Set to True to re-enable the "update available" popup.
+# When True the app periodically checks GitHub Releases for a newer build and
+# shows an update arrow button in the top bar. Clicking it downloads the new
+# exe, closes the app, installs it and relaunches — without touching user data.
 ENABLE_UPDATE_CHECK = False
 
 
-def _check_for_update():
-    try:
-        import urllib.request
-        url = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
-        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github.v3+json"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
-            tag = data.get("tag_name", "").lstrip("v")
-            if tag and tag != APP_VERSION:
-                from PySide6.QtCore import QSettings
-                settings = QSettings("ورشة طباعة", "App")
-                last_shown = settings.value("update_shown_version", "", type=str)
-                if last_shown == tag:
-                    return None
-                return {"version": tag, "notes": data.get("body", "")}
-    except Exception as e:
-        logging.debug("Update check failed: %s", e)
-    return None
+def _update_contexts():
+    """Build the updater callback bundle used by the UI (frozen app only).
 
+    The default source is the public GitHub repo. For a *closed* test (so an
+    update reaches only your own machine and never other users), you can point
+    the app at a private/test repo or a custom download URL by adding optional
+    keys to ``data/app_config.json``:
 
-def _notify_update(update_info):
-    from PySide6.QtWidgets import QMessageBox
-    from PySide6.QtCore import QSettings
-    msg = QMessageBox()
-    msg.setWindowTitle("تحديث جديد متاح")
-    msg.setIcon(QMessageBox.Information)
-    msg.setText(f"إصدار {update_info['version']} متاح!")
-    msg.setInformativeText(f"الإصدار الحالي: {APP_VERSION}\nالإصدار الجديد: {update_info['version']}\n\nهل تريد التحميل؟")
-    msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-    msg.setDefaultButton(QMessageBox.Yes)
-    result = msg.exec()
-    settings = QSettings("ورشة طباعة", "App")
-    settings.setValue("update_shown_version", update_info["version"])
-    if result == QMessageBox.Yes:
-        import webbrowser
-        webbrowser.open(_DOWNLOAD_PAGE)
+        { "update_repo": "you/test-repo",
+          "update_download_page": "https://..." }
+
+    When those keys are absent the app falls back to the production repo.
+    """
+    if not ENABLE_UPDATE_CHECK or not getattr(sys, "frozen", False):
+        return None
+    cfg = _load_config()
+    return {
+        "version": APP_VERSION,
+        "repo": cfg.get("update_repo") or _GITHUB_REPO,
+        "download_page": cfg.get("update_download_page") or _DOWNLOAD_PAGE,
+    }
 
 
 def main():
@@ -134,12 +120,8 @@ def main():
     icon = QIcon(_icon_path())
     if not icon.isNull():
         app.setWindowIcon(icon)
-    window = IDCardApp(use_api=use_api)
+    window = IDCardApp(use_api=use_api, update_ctx=_update_contexts())
     window.show()
-    if frozen and ENABLE_UPDATE_CHECK:
-        update = _check_for_update()
-        if update:
-            _notify_update(update)
     file_arg = None
     for arg in sys.argv[1:]:
         if os.path.isfile(arg) and arg.lower().endswith(".wwk"):

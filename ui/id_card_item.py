@@ -3,7 +3,7 @@ from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QPixmap, QPen, QPainter, QColor, QBrush, QFont, QPainterPath
 
 CARD_W = 95
-CARD_H = 60
+CARD_H = 55
 ROT_HANDLE_SIZE = 12
 
 
@@ -113,7 +113,6 @@ class IDCardItem(QGraphicsPixmapItem):
     def paint(self, painter, option, widget):
         source = self.pixmap()
         if not source.isNull():
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
             painter.save()
             painter.setClipRect(QRectF(0, 0, CARD_W, CARD_H))
             painter.fillRect(QRectF(0, 0, CARD_W, CARD_H), Qt.white)
@@ -123,8 +122,9 @@ class IDCardItem(QGraphicsPixmapItem):
             if r == 90 or r == 270:
                 rbase = min(CARD_H / source.width(), CARD_W / source.height(), 1.0)
                 scale = rbase * self._scale
-            dw = source.width() * scale
-            dh = source.height() * scale
+            dw = max(1, int(source.width() * scale))
+            dh = max(1, int(source.height() * scale))
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             px, py = self._pan_x, self._pan_y
             if self._snapped:
                 if r == 0:
@@ -155,8 +155,10 @@ class IDCardItem(QGraphicsPixmapItem):
                     painter.rotate(r)
                     painter.drawPixmap(QRectF(-dw / 2, -dh / 2, dw, dh), source, source.rect())
             painter.restore()
+        scene = self.scene()
+        printing = bool(getattr(scene, "_printing", False)) if scene is not None else False
         selected = bool(option.state & QStyle.State_Selected)
-        if selected:
+        if selected and not printing:
             painter.setPen(QPen(QColor("#1a73e8"), 2.5))
             painter.setBrush(QBrush())
             painter.drawRoundedRect(QRectF(1.5, 1.5, CARD_W - 3, CARD_H - 3), 3, 3)
@@ -173,7 +175,7 @@ class IDCardItem(QGraphicsPixmapItem):
             painter.setPen(QPen(Qt.white, 1.2))
             painter.drawEllipse(self._move_rect)
             painter.drawText(self._move_rect, Qt.AlignCenter, "⤡")
-        else:
+        elif not printing:
             painter.setPen(QPen(Qt.gray, 0.5))
             painter.drawRect(QRectF(0, 0, CARD_W, CARD_H))
 

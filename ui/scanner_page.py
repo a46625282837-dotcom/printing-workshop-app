@@ -3,7 +3,7 @@ import math
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QComboBox, QFileDialog, QMessageBox, QSlider,
+    QComboBox, QFileDialog, QMessageBox, QSlider, QApplication,
     QGraphicsView, QGraphicsScene, QSizePolicy, QScrollArea,
     QFrame, QSpinBox, QAbstractSpinBox, QGraphicsRectItem,
     QGraphicsPixmapItem,
@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF, QRect
 from PySide6.QtGui import (
     QImage, QPixmap, QPainter, QColor, QPageSize, QPen, QFont,
-    QBrush, QCursor, QTransform,
+    QBrush, QCursor, QTransform, QKeySequence,
 )
 from PySide6.QtPrintSupport import QPrinter
 
@@ -150,17 +150,29 @@ class _ScanView(QGraphicsView):
             p.wheelEvent(event)
 
 
-def _layout_images_on_scene(scene, images, page_num, total_pages, multi_scan=False, img_positions=None, img_scales=None):
+def _layout_images_on_scene(scene, images, page_num, total_pages, multi_scan=False, img_positions=None, img_scales=None, display_cache=None):
     scene.addRect(0, 0, A4_W, A4_H, QPen(QColor("#cccccc")), QColor("white"))
     aw = A4_W - 2 * MARGIN
     ah = A4_H - 2 * MARGIN
     n = len(images)
+
+    def _scaled(qimg, sw, sh, mode_key):
+        key = (id(qimg), mode_key, sw, sh)
+        if display_cache is not None and key in display_cache:
+            return display_cache[key]
+        pix = QPixmap.fromImage(qimg)
+        scaled = pix.scaled(sw, sh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if display_cache is not None:
+            if len(display_cache) > 300:
+                display_cache.clear()
+            display_cache[key] = scaled
+        return scaled
+
     if not multi_scan:
         if images:
             qimg = images[-1]
             if not qimg.isNull():
-                pix = QPixmap.fromImage(qimg)
-                scaled = pix.scaled(aw, ah, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                scaled = _scaled(qimg, aw, ah, "single")
                 x = (A4_W - scaled.width()) / 2
                 y = (A4_H - scaled.height()) / 2
                 scene.addPixmap(scaled).setPos(x, y)
@@ -171,14 +183,13 @@ def _layout_images_on_scene(scene, images, page_num, total_pages, multi_scan=Fal
                 continue
             col = i % 2
             x_off = MARGIN + col * half_w
-            pix = QPixmap.fromImage(qimg)
             key = (page_num, i)
             scale = 1.0
             if img_scales and key in img_scales:
                 scale = img_scales[key]
             scaled_w = max(10, int(half_w * scale))
             scaled_h = max(10, int(ah * scale))
-            scaled = pix.scaled(scaled_w, scaled_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled = _scaled(qimg, scaled_w, scaled_h, key)
             item = scene.addPixmap(scaled)
             item.setFlag(QGraphicsPixmapItem.ItemIsMovable, True)
             item.setFlag(QGraphicsPixmapItem.ItemSendsGeometryChanges, True)
@@ -222,14 +233,17 @@ class ScannerPage(QWidget):
         self._copied_image = None
         self._undo_stack = []
         self._redo_stack = []
+        self._thumb_cache = {}
+        self._thumb_widgets = {}
+        self._last_selected = 0
         self._build_ui()
         self._refresh_scanners()
         self.setFocusPolicy(Qt.StrongFocus)
 
     def keyPressEvent(self, event):
-        if event.matches(event.StandardKey.Copy):
+        if event.matches(QKeySequence.StandardKey.Copy):
             self._copy_image()
-        elif event.matches(event.StandardKey.Paste):
+        elif event.matches(QKeySequence.StandardKey.Paste):
             self._paste_image()
         else:
             super().keyPressEvent(event)
@@ -381,10 +395,11 @@ class ScannerPage(QWidget):
         self._view = _ScanView(self._scene, self)
         self._view.setRenderHint(QPainter.RenderHint.Antialiasing)
         self._view.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        self._view.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
         self._view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._view.setStyleSheet("QGraphicsView { background: #4a4a4a; }")
         self._view.erase_stroke.connect(self._on_erase_stroke)
-        self._view.erase_done.connect(self._update_paper)
+        self._view.erase_done.connect(self._on_erase_done)
         self._view.erase_started.connect(self._push_undo)
         layout.addWidget(self._view, 1)
 
@@ -531,15 +546,35 @@ class ScannerPage(QWidget):
         layout.addLayout(bottom)
 
     def _push_undo(self):
-        self._undo_stack.append([QImage(img) for img in self._images])
+        self._undo_stack.append(self._snapshot_state())
+        if len(self._undo_stack) > 50:
+            self._undo_stack.pop(0)
         self._redo_stack.clear()
         self._update_undo_buttons()
+
+    def _snapshot_state(self):
+        return ([QImage(img) for img in self._images],
+                dict(self._page_map), self._next_page_num)
+
+    def _restore_state(self, state):
+        images, page_map, next_page_num = state
+        self._images = list(images)
+        self._page_map = dict(page_map)
+        self._next_page_num = next_page_num
+        if self._images:
+            self._selected_idx = min(self._selected_idx, len(self._images) - 1)
+            self._current_page = self._page_map.get(self._selected_idx, 0)
+        else:
+            self._selected_idx = 0
+            self._current_page = 0
+            self._next_page_num = 0
+        self._thumb_cache.clear()
 
     def _undo(self):
         if not self._undo_stack:
             return
-        self._redo_stack.append([QImage(img) for img in self._images])
-        self._images = self._undo_stack.pop()
+        self._redo_stack.append(self._snapshot_state())
+        self._restore_state(self._undo_stack.pop())
         self._update_undo_buttons()
         self._rebuild_thumbnails()
         self._update_paper()
@@ -548,8 +583,8 @@ class ScannerPage(QWidget):
     def _redo(self):
         if not self._redo_stack:
             return
-        self._undo_stack.append([QImage(img) for img in self._images])
-        self._images = self._redo_stack.pop()
+        self._undo_stack.append(self._snapshot_state())
+        self._restore_state(self._redo_stack.pop())
         self._update_undo_buttons()
         self._rebuild_thumbnails()
         self._update_paper()
@@ -583,7 +618,7 @@ class ScannerPage(QWidget):
             return
         self._push_undo()
         self._images[self._selected_idx] = qimg.mirrored(True, False)
-        self._rebuild_thumbnails()
+        self._update_card_thumb(self._selected_idx)
         self._update_paper()
         self._fit_view()
 
@@ -595,7 +630,7 @@ class ScannerPage(QWidget):
             return
         self._push_undo()
         self._images[self._selected_idx] = qimg.mirrored(False, True)
-        self._rebuild_thumbnails()
+        self._update_card_thumb(self._selected_idx)
         self._update_paper()
         self._fit_view()
 
@@ -619,7 +654,9 @@ class ScannerPage(QWidget):
             self._next_page_num += 1
         self._selected_idx = gidx
         self._current_page = self._page_map[gidx]
-        self._rebuild_thumbnails()
+        self._incremental_add_thumb(gidx)
+        self._apply_selection_borders()
+        self._update_info_label()
         self._update_paper()
         self._fit_view()
 
@@ -644,6 +681,7 @@ class ScannerPage(QWidget):
         p.drawEllipse(px - er, py - er, er * 2, er * 2)
         p.end()
         self._images[self._selected_idx] = qimg
+        self._thumb_cache.pop(self._selected_idx, None)
         items = self._scene.items()
         page_gidxs = self._page_image_indices(self._current_page)
         if self._selected_idx in page_gidxs:
@@ -700,7 +738,6 @@ class ScannerPage(QWidget):
         )
         if not paths:
             return
-        from PySide6.QtWidgets import QApplication
         for path in paths:
             try:
                 qimg = QImage(path)
@@ -715,6 +752,7 @@ class ScannerPage(QWidget):
                         self._next_page_num += 1
                     self._selected_idx = gidx
                     self._current_page = self._page_map[gidx]
+                    self._incremental_add_thumb(gidx)
             except Exception as e:
                 logger.warning("فشل تحميل الصورة %s: %s", path, e)
             if len(self._images) % 5 == 0:
@@ -722,7 +760,8 @@ class ScannerPage(QWidget):
         self._undo_stack.clear()
         self._redo_stack.clear()
         self._update_undo_buttons()
-        self._rebuild_thumbnails()
+        self._apply_selection_borders()
+        self._update_info_label()
         self._update_paper()
         self._fit_view()
         logger.info("تم استيراد %d صورة", len(paths))
@@ -741,37 +780,133 @@ class ScannerPage(QWidget):
             self._next_page_num += 1
         self._selected_idx = gidx
         self._current_page = self._page_map[gidx]
-        self._rebuild_thumbnails()
+        self._incremental_add_thumb(gidx)
+        self._apply_selection_borders()
+        self._update_info_label()
         self._update_paper()
         self._fit_view()
         logger.info("تمت إضافة صورة %d (صفحة %d/%d)",
                      gidx + 1, self._current_page + 1, self._total_pages())
 
     def _rebuild_thumbnails(self):
-        for i in range(self._thumb_layout.count()):
-            item = self._thumb_layout.itemAt(i)
-            if item and item.widget():
-                item.widget().deleteLater()
-        for page_num in range(self._next_page_num):
-            page_gidxs = self._page_image_indices(page_num)
-            if not page_gidxs:
-                continue
-            hdr = QLabel(f"ص{page_num + 1}")
-            hdr.setStyleSheet(
-                "color:#aaa;font-size:10px;padding:2px 4px;"
-                "background:#555;border-radius:3px;"
-            )
-            hdr.setFixedWidth(28)
-            self._thumb_layout.insertWidget(self._thumb_layout.count() - 1, hdr)
-            for gidx in page_gidxs:
-                card = self._make_thumb_card(gidx, self._images[gidx])
-                self._thumb_layout.insertWidget(self._thumb_layout.count() - 1, card)
+        layout = self._thumb_layout
+        self._thumb_widgets.clear()
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+        pages = {}
+        for gidx, page in self._page_map.items():
+            pages.setdefault(page, []).append(gidx)
+        self._thumb_container.setUpdatesEnabled(False)
+        try:
+            count = 0
+            for page_num in sorted(pages):
+                page_gidxs = sorted(pages[page_num])
+                layout.addWidget(self._make_page_header(page_num))
+                for gidx in page_gidxs:
+                    layout.addWidget(self._make_thumb_card(gidx, self._images[gidx]))
+                    count += 1
+                    if count % 50 == 0:
+                        QApplication.processEvents()
+            layout.addStretch()
+        finally:
+            self._thumb_container.setUpdatesEnabled(True)
+        self._apply_selection_borders(force=True)
+        self._update_info_label()
+
+    def _update_info_label(self):
         total = len(self._images)
         self._lbl_info.setText(
             f"عدد الصور: {total} | صفحات: {self._total_pages()} | "
             f"المحددة: {self._selected_idx + 1}"
             if total else "لا توجد صور"
         )
+
+    def _make_page_header(self, page_num):
+        hdr = QLabel(f"ص{page_num + 1}")
+        hdr.setStyleSheet(
+            "color:#aaa;font-size:10px;padding:2px 4px;"
+            "background:#555;border-radius:3px;"
+        )
+        hdr.setFixedWidth(28)
+        return hdr
+
+    def _incremental_add_thumb(self, gidx):
+        layout = self._thumb_layout
+        before_stretch = max(0, layout.count() - 1)
+        page = self._page_map.get(gidx, 0)
+        page_gidxs = self._page_image_indices(page)
+        if page_gidxs and page_gidxs[0] == gidx:
+            layout.insertWidget(before_stretch, self._make_page_header(page))
+            before_stretch = max(0, layout.count() - 1)
+        layout.insertWidget(before_stretch, self._make_thumb_card(gidx, self._images[gidx]))
+
+    def _swap_card_thumbs(self, a, b):
+        ea = self._thumb_widgets.get(a)
+        eb = self._thumb_widgets.get(b)
+        if not ea or not eb:
+            self._thumb_cache.clear()
+            self._rebuild_thumbnails()
+            return
+        _, la, _ = ea
+        _, lb, _ = eb
+        ca = self._thumb_cache.pop(a, None)
+        cb = self._thumb_cache.pop(b, None)
+        if ca is not None:
+            self._thumb_cache[b] = ca
+            lb.setPixmap(ca)
+        else:
+            self._update_card_thumb(b)
+        if cb is not None:
+            self._thumb_cache[a] = cb
+            la.setPixmap(cb)
+        else:
+            self._update_card_thumb(a)
+
+    def _sync_card_numbers(self):
+        for gidx, (_frame, _lbl, num_spin) in self._thumb_widgets.items():
+            num_spin.blockSignals(True)
+            try:
+                num_spin.setValue(gidx + 1)
+            finally:
+                num_spin.blockSignals(False)
+            le = num_spin.lineEdit()
+            if le is not None:
+                le.deselect()
+
+    def _apply_selection_borders(self, force=False):
+        idxs = (self._last_selected, self._selected_idx) if not force else self._thumb_widgets.keys()
+        for idx in idxs:
+            entry = self._thumb_widgets.get(idx)
+            if not entry:
+                continue
+            frame, _lbl, _spin = entry
+            border = "#2196F3" if idx == self._selected_idx else "#666"
+            frame.setStyleSheet(
+                f"QFrame{{background:#444;border:2px solid {border};border-radius:6px;}}"
+            )
+        self._last_selected = self._selected_idx
+
+    def _update_card_thumb(self, gidx):
+        entry = self._thumb_widgets.get(gidx)
+        if not entry:
+            return
+        _, lbl_img, _ = entry
+        qimg = self._images[gidx]
+        if qimg.isNull():
+            return
+        thumb = QPixmap.fromImage(qimg).scaled(
+            90, 65, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self._thumb_cache[gidx] = thumb
+        lbl_img.setPixmap(thumb)
+
+    def _on_erase_done(self):
+        if 0 <= self._selected_idx < len(self._images):
+            self._update_card_thumb(self._selected_idx)
+        self._update_paper()
 
     def _make_thumb_card(self, gidx, qimg):
         frame = QFrame()
@@ -787,7 +922,7 @@ class ScannerPage(QWidget):
         num_row = QHBoxLayout()
         num_row.setSpacing(2)
         num_spin = QSpinBox()
-        num_spin.setRange(1, 999)
+        num_spin.setRange(1, 9999)
         num_spin.setValue(gidx + 1)
         num_spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
         num_spin.setFixedWidth(35)
@@ -807,8 +942,11 @@ class ScannerPage(QWidget):
         btn_del.clicked.connect(lambda _, i=gidx: self._delete_image(i))
         num_row.addWidget(btn_del)
         layout.addLayout(num_row)
-        pix = QPixmap.fromImage(qimg)
-        thumb = pix.scaled(90, 65, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        thumb = self._thumb_cache.get(gidx)
+        if thumb is None and not qimg.isNull():
+            thumb = QPixmap.fromImage(qimg).scaled(
+                90, 65, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self._thumb_cache[gidx] = thumb
         lbl_img = QLabel()
         lbl_img.setPixmap(thumb)
         lbl_img.setAlignment(Qt.AlignCenter)
@@ -816,6 +954,7 @@ class ScannerPage(QWidget):
         lbl_img.setFixedSize(90, 65)
         lbl_img.mousePressEvent = lambda _, i=gidx: self._select_image(i)
         layout.addWidget(lbl_img, 0, Qt.AlignHCenter)
+        self._thumb_widgets[gidx] = (frame, lbl_img, num_spin)
         return frame
 
     def _select_image(self, gidx):
@@ -823,7 +962,8 @@ class ScannerPage(QWidget):
             self._selected_idx = gidx
             self._current_page = self._page_map.get(gidx, 0)
             self._set_tool("select")
-            self._rebuild_thumbnails()
+            self._apply_selection_borders()
+            self._update_info_label()
             try:
                 self._update_paper()
                 self._fit_view()
@@ -840,6 +980,7 @@ class ScannerPage(QWidget):
         self._page_map.clear()
         for i, page in enumerate(page_assignments):
             self._page_map[i] = page
+        self._thumb_cache.clear()
         if not self._images:
             self._selected_idx = 0
             self._current_page = 0
@@ -870,13 +1011,19 @@ class ScannerPage(QWidget):
         self._images[from_gidx], self._images[to_gidx] = self._images[to_gidx], self._images[from_gidx]
         self._img_positions.clear()
         self._img_scales.clear()
+        if from_gidx in self._thumb_widgets and to_gidx in self._thumb_widgets:
+            self._swap_card_thumbs(from_gidx, to_gidx)
+        else:
+            self._thumb_cache.clear()
         old_selected = self._selected_idx
         if old_selected == from_gidx:
             self._selected_idx = to_gidx
         elif old_selected == to_gidx:
             self._selected_idx = from_gidx
         self._current_page = self._page_map.get(self._selected_idx, 0)
-        self._rebuild_thumbnails()
+        self._sync_card_numbers()
+        self._apply_selection_borders()
+        self._update_info_label()
         self._update_paper()
         self._fit_view()
 
@@ -920,13 +1067,20 @@ class ScannerPage(QWidget):
                             old_pos.y() + (old_h - new_pix.height()) / 2)
                 self._img_positions[key] = item.pos()
 
+    def _display_cache(self):
+        c = getattr(self, "_display_cache_store", None)
+        if c is None:
+            c = self._display_cache_store = {}
+        return c
+
     def _update_paper(self):
         self._view._cleanup()
         self._scene.clear()
         page_images = self._page_images(self._current_page)
         _layout_images_on_scene(self._scene, page_images,
                                 self._current_page, self._total_pages(),
-                                self._multi_scan, self._img_positions, self._img_scales)
+                                self._multi_scan, self._img_positions, self._img_scales,
+                                self._display_cache())
         self._scene.setSceneRect(0, 0, A4_W, A4_H)
         self._scene.update()
         self._view.viewport().update()
@@ -935,7 +1089,8 @@ class ScannerPage(QWidget):
         s = QGraphicsScene()
         page_images = self._page_images(page_num)
         _layout_images_on_scene(s, page_images, page_num, self._total_pages(),
-                                self._multi_scan, self._img_positions, self._img_scales)
+                                self._multi_scan, self._img_positions, self._img_scales,
+                                self._display_cache())
         return s
 
     def _fit_view(self):

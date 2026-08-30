@@ -602,6 +602,7 @@ class TextEditor(QWidget):
         self._view = QGraphicsView(self._scene)
         self._view.setRenderHint(QPainter.Antialiasing)
         self._view.setRenderHint(QPainter.SmoothPixmapTransform)
+        self._view.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
         self._view.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._view.setStyleSheet("QGraphicsView { background: #4a4a4a; border: none; }")

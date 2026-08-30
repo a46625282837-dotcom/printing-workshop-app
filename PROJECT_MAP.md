@@ -710,6 +710,53 @@ Other call sites (`_refresh_user_data`, `_auto_refresh_data`, `_login_submit`) k
 **Files changed:** `ui/main_window.py`, `tests.py`, `PROJECT_MAP.md`
 **Tests:** new regression test passes; 51 relevant client tests pass (the only failures are pre-existing env ones: `backend.app` needs `flask`, not installed in the client env — unrelated)
 
+### v1.7.0 (2026-08-28) — In-App Self-Update (OpenCode-style)
+
+**Feature:** The app can now update itself in the background, exactly like OpenCode — an update arrow button appears in the top bar only when a newer build exists on GitHub Releases. Clicking it downloads, installs, and relaunches the app automatically, keeping every section, feature, and the user's `data/` folder untouched.
+
+**Design (replaces the old annoying startup popup that was removed in v1.4.3):**
+- No popup on startup/login. Instead a small **⬆ arrow button** appears in the main-screen top bar **only when an update is actually available** (a background `QTimer` polls GitHub Releases every 6h, first poll ~1.5s after launch).
+- Hovering the button shows a tooltip explaining exactly what it does: "توجد نسخة أحدث من التطبيق. اضغط لتنزيلها وتثبيتها تلقائياً. سَيُغلق التطبيق ويعاد فتحه تلقائياً بعد التحديث."
+- Clicking it: refreshes the check → confirmation dialog → background download on a `QThread` with a small progress dialog → exits the app → a hidden helper script swaps the exe → relaunches the app.
+- Never touches the `data/` folder → users keep all sessions, subscriptions, config.
+
+**Mechanism (`core/updater.py` — new):**
+- `is_frozen()` — only meaningful for the packaged EXE; everything degrades gracefully in source mode.
+- `check_for_update(current_version, repo)` — queries `https://api.github.com/repos/{repo}/releases/latest`, compares dotted versions, returns `{version, notes, download_url}` if the release tag is newer and has a `WorshaApp.exe` asset; returns `None` on any network/API failure.
+- `apply_update(update_info)` — downloads the new exe to `<exe_dir>/WorshaApp.exe.new` (streaming, chunked), then launches a hidden `cmd` helper script (`CREATE_NO_WINDOW`) and lets the app exit.
+- **Helper script** (`worsha_upd_*.bat`): loops on `tasklist` until `WorshaApp.exe` is gone, then `move /Y "WorshaApp.exe.new" "WorshaApp.exe"`, then `start "" "WorshaApp.exe"` to relaunch — from the same folder, so `data/` is preserved.
+- Safety: before swapping, compares crc32+size of the downloaded exe vs the current one; if identical, aborts (no pointless replace).
+
+**UI wiring (`ui/main_window.py`):**
+- `IDCardApp.__init__(use_api=False, update_ctx=None)` — `update_ctx` is a dict `{version, repo, download_page}` built in `main.py` only when the app is frozen (`_update_contexts()`), so source/dev runs get `None` and no button.
+- New `self._update_btn` (⬆) added to the `top_row` of the main screen (left side, next to the notifications button), hidden by default, shown by `_check_for_update_bg()`.
+- `_check_for_update_bg()` / `_on_update_clicked()` / `_on_update_worker_done()` implement the flow; a strong reference `self._update_worker` keeps the download `QThread` alive.
+- **Wide red confirmation bar:** a `self._update_bar` (44px-tall, red `#d32f2f`) sits at the very bottom of the main screen, hidden by default. On a successful self-update the app writes a notice (version) to `data/update_notice.txt` + registry (`QSettings`). On the next launch `_consume_update_notice()` reads, shows the bar ("تم تحديث التطبيق إلى الإصدار X") for 12s via `_show_update_bar()`, then clears the flag. `_show_update_bar(msg, red=True)` also supports a blue variant.
+
+**Build (`WorshaApp.spec`):**
+- Added `'core.updater'` to `hiddenimports` so the module is bundled even though it's imported dynamically inside functions (PyInstaller otherwise may miss it).
+
+**Entry point (`main.py`):**
+- `APP_VERSION = "1.4.1"` — aligns with the current GitHub release tag `v1.4.1` so the button stays hidden until a newer build is uploaded.
+- `ENABLE_UPDATE_CHECK = True`, `_GITHUB_REPO`, `_DOWNLOAD_PAGE` kept.
+- **Closed test override:** `_update_contexts()` reads optional `update_repo` / `update_download_page` keys from `data/app_config.json`. When present they redirect the update source so a trial reaches only your machine and never other users; when absent it falls back to the production repo. Add those keys ONLY on your test copy's `data/app_config.json` (and remove before shipping).
+
+**Release flow (how to push a version to ALL users):**
+1. Make changes → bump `APP_VERSION` in `main.py`.
+2. Build: `pyinstaller WorshaApp.spec --noconfirm` → produces `dist/WorshaApp.exe`.
+3. Create a **GitHub Release** in `a46625282837-dotcom/printing-workshop-app` with tag `v<version>` and upload the **`WorshaApp.exe`** as the release asset (same filename is REQUIRED — the updater looks for it by name).
+4. Users already on an older version see the ⬆ button automatically and can update in-app. New users download from the download page as before.
+
+**Files changed:** `core/updater.py` (new), `main.py`, `ui/main_window.py`, `WorshaApp.spec`, `PROJECT_MAP.md`
+**Verified:** `check_for_update('1.4.1')` → None; `check_for_update('1.4.0')` → returns v1.4.1 + download URL; EXE builds at 146.7 MB; `core.updater` present in the build Analysis.
+
+### v2.x (2026-08-29) — Onedir + Self-Update **disabled**
+
+- Distribution switched to PyInstaller **onedir** (`WorshaApp_onedir.spec` → `dist/WorshaApp/` = `WorshaApp.exe` + `_internal/`, zip as `WorshaApp_v2.zip`) for fast cold start (~seconds vs 25-30s onefile).
+- **Decision:** self-update is **disabled** until further notice. `ENABLE_UPDATE_CHECK = False` in `main.py` → `_update_contexts()` returns `None` → no ⬆ arrow, no background GitHub poll, no red bar (`_consume_update_notice()` early-returns when `_update_ctx is None`).
+- `core/updater.py` is kept but dormant (not called). `core.updater` stays in `hiddenimports` (harmless, no side-effects).
+- `APP_VERSION = "2.1.0"`, repo/download constants retained.
+
 ## Deploy (Local / Standalone)
 Copy the exe to any Windows PC and run it.
 No Python required. Data is saved next to the exe in `data/` folder.

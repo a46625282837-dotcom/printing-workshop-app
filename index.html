@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ورشة طباعة - تحميل التطبيق</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap');
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Cairo', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .hero {
+            text-align: center;
+            padding: 80px 20px 40px;
+            max-width: 800px;
+        }
+
+        .hero h1 {
+            font-size: 48px;
+            font-weight: 800;
+            margin-bottom: 16px;
+            background: linear-gradient(135deg, #4facfe, #00f2fe);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero p {
+            font-size: 20px;
+            color: rgba(255,255,255,0.7);
+            margin-bottom: 40px;
+            line-height: 1.8;
+        }
+
+        .download-section {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 600px;
+            width: 90%;
+            text-align: center;
+            backdrop-filter: blur(10px);
+        }
+
+        .version-badge {
+            display: inline-block;
+            background: rgba(79, 172, 254, 0.2);
+            border: 1px solid rgba(79, 172, 254, 0.4);
+            color: #4facfe;
+            padding: 6px 20px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 24px;
+        }
+
+        .download-btn {
+            display: inline-block;
+            background: linear-gradient(135deg, #4facfe, #00f2fe);
+            color: #fff;
+            text-decoration: none;
+            padding: 18px 48px;
+            border-radius: 14px;
+            font-size: 20px;
+            font-weight: 700;
+            font-family: 'Cairo', sans-serif;
+            transition: all 0.3s ease;
+            box-shadow: 0 8px 32px rgba(79, 172, 254, 0.3);
+            cursor: pointer;
+            border: none;
+        }
+
+        .download-btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 12px 40px rgba(79, 172, 254, 0.5);
+        }
+
+        .download-btn:active {
+            transform: translateY(-1px);
+        }
+
+        .file-info {
+            margin-top: 20px;
+            color: rgba(255,255,255,0.5);
+            font-size: 14px;
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 24px;
+            max-width: 900px;
+            width: 90%;
+            margin: 60px 0;
+        }
+
+        .feature-card {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 16px;
+            padding: 28px 20px;
+            text-align: center;
+            transition: transform 0.3s ease;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-4px);
+        }
+
+        .feature-icon {
+            font-size: 36px;
+            margin-bottom: 12px;
+        }
+
+        .feature-card h3 {
+            font-size: 16px;
+            margin-bottom: 8px;
+            color: #4facfe;
+        }
+
+        .feature-card p {
+            font-size: 13px;
+            color: rgba(255,255,255,0.5);
+            line-height: 1.6;
+        }
+
+        .footer {
+            padding: 30px 20px;
+            text-align: center;
+            color: rgba(255,255,255,0.3);
+            font-size: 13px;
+        }
+
+        .footer a {
+            color: #4facfe;
+            text-decoration: none;
+        }
+
+        .screenshot {
+            max-width: 500px;
+            width: 90%;
+            border-radius: 16px;
+            margin: 40px 0;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .update-note {
+            background: rgba(52, 168, 83, 0.15);
+            border: 1px solid rgba(52, 168, 83, 0.3);
+            border-radius: 12px;
+            padding: 16px 24px;
+            margin-top: 24px;
+            color: #34a853;
+            font-size: 14px;
+            line-height: 2;
+        }
+
+        @media (max-width: 600px) {
+            .hero h1 { font-size: 32px; }
+            .hero p { font-size: 16px; }
+            .download-section { padding: 28px 20px; }
+            .download-btn { padding: 14px 36px; font-size: 17px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="hero">
+        <h1>ورشة طباعة</h1>
+        <p>تطبيق شامل لطباعة بطاقات الهوية، صور شخصية، تحرير النصوص، PDF، والمسح الضوئي — مدعوم بالذكاء الاصطناعي</p>
+    </div>
+
+    <div class="download-section">
+        <div class="version-badge"> الإصدار v1.4.2</div>
+        <br>
+        <a href="https://github.com/a46625282837-dotcom/printing-workshop-app/releases/download/v1.4.2/WorshaApp_update.zip"
+           class="download-btn" id="downloadBtn">
+            تحميل التطبيق
+        </a>
+        <div class="file-info">WorshaApp_update.zip — 165MB — Windows 10/11</div>
+        <div class="update-note">
+            بعد التحميل: فك ضغط الملف ثم شغّل <b>WorshaApp.exe</b> من المجلد.<br>
+            يتحدث تلقائياً عند توفر إصدار جديد
+        </div>
+    </div>
+
+    <div class="features">
+        <div class="feature-card">
+            <div class="feature-icon">🪪</div>
+            <h3>بطاقات الهوية</h3>
+            <p>ترتيب وطباعة بطاقات الهوية بشكل احترافي</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon">📸</div>
+            <h3>صور شخصية</h3>
+            <p>قص وطباعة صور شخصية بأحجام معتمدة</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon">🤖</div>
+            <h3>تحسين بالذكاء الاصطناعي</h3>
+            <p>تحسين جودة الصور تلقائياً بـ GFPGAN و RealESRGAN</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon">📝</div>
+            <h3>محرر النصوص</h3>
+            <p>كتابة وتحرير النصوص مع تنسيق متقدم</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon">📄</div>
+            <h3>تحرير PDF</h3>
+            <p>فتح وتحرير ملفات PDF بسهولة</p>
+        </div>
+        <div class="feature-card">
+            <div class="feature-icon">🖨️</div>
+            <h3>مسح ضوئي</h3>
+            <p>استيراد صور من السكنر مباشرة مع تعديل متعدد</p>
+        </div>
+    </div>
+
+    <div class="footer">
+        <p>للتواصل: WhatsApp <a href="https://wa.me/9647865402819">07865402819</a></p>
+        <p style="margin-top:8px;">Worsha Workshop &copy; 2026</p>
+    </div>
+</body>
+</html>

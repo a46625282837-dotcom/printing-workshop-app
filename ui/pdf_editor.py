@@ -35,6 +35,7 @@ class PdfGraphicsView(QGraphicsView):
         self.setAcceptDrops(True)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
         self.setDragMode(QGraphicsView.NoDrag)
         self._is_panning = False
         self._pan_start = None

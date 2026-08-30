@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
                                QDialog, QApplication, QProgressBar,
                                QComboBox, QPlainTextEdit)
 from PySide6.QtGui import QAction
-from PySide6.QtCore import Qt, QSize, Signal, QDate, QTimer
+from PySide6.QtCore import Qt, QSize, Signal, QDate, QTimer, QObject
 from PySide6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QBrush, QFont
 from PySide6.QtWidgets import QGraphicsDropShadowEffect, QLayout, QLayoutItem, QScrollArea
 from datetime import date, timedelta
@@ -29,6 +29,14 @@ IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff'}
 _NO_SUB_MSG = "يجب أن تشترك قبل الاستخدام. تواصل مع المالك: واتساب 07865402819"
 
 logger = logging.getLogger(__name__)
+
+
+class _StartupSignals(QObject):
+    session_finished = Signal(object, object)
+    banners_finished = Signal(object, object)
+
+
+_startup_signals = _StartupSignals()
 
 FUTURE_STYLE = """
     QPushButton { background: #f0f0f0; border-color: #ccc; color: #aaa; }
@@ -233,9 +241,11 @@ def _make_password_field(placeholder_text, font_size="14px", padding="8px"):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, use_api=False):
+    def __init__(self, use_api=False, update_ctx=None):
         super().__init__()
         self._use_api = use_api
+        self._update_ctx = update_ctx
+        self._update_info = None
         self.setWindowTitle("ورشة طباعة")
         self.setMinimumSize(600, 520)
         self.setLayoutDirection(Qt.RightToLeft)
@@ -336,6 +346,14 @@ class MainWindow(QMainWindow):
         self._notif_timer.setInterval(60000)
         self._notif_timer.timeout.connect(self._on_notif_timer)
 
+        if self._update_ctx is not None:
+            self._update_timer = QTimer(self)
+            # Check once on startup, then periodically (every 6h) in background.
+            self._update_timer.setInterval(6 * 60 * 60 * 1000)
+            self._update_timer.timeout.connect(self._check_for_update_bg)
+            self._update_timer.start()
+            QTimer.singleShot(1500, self._check_for_update_bg)
+
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(15000)
         self._refresh_timer.timeout.connect(self._auto_refresh_data)
@@ -344,11 +362,14 @@ class MainWindow(QMainWindow):
         self._heartbeat_timer.setInterval(300000)
         self._heartbeat_timer.timeout.connect(self._send_heartbeat)
 
-        self._update_banners()
+        QTimer.singleShot(120, self._update_banners)
 
         self._notif_timer.start()
         self._refresh_timer.start()
         self._heartbeat_timer.start()
+
+        _startup_signals.session_finished.connect(self._on_session_verify)
+        _startup_signals.banners_finished.connect(self._apply_banners)
 
         self._try_restore_session()
 
@@ -368,6 +389,23 @@ class MainWindow(QMainWindow):
  
         top_row = QHBoxLayout()
         top_row.setAlignment(Qt.AlignLeft)
+
+        self._update_btn = QPushButton("⬆") if self._update_ctx else None
+        if self._update_btn is not None:
+            self._update_btn.setFixedSize(34, 34)
+            self._update_btn.setToolTip("توجد نسخة أحدث من التطبيق. اضغط لتنزيلها وتثبيتها تلقائياً.\nسَيُغلق التطبيق ويعاد فتحه تلقائياً بعد التحديث.")
+            self._update_btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(26, 115, 232, 230); color: white;
+                    font-size: 18px; font-weight: bold; border: none;
+                    border-radius: 17px;
+                }
+                QPushButton:hover { background: rgba(21, 87, 176, 235); }
+            """)
+            self._update_btn.clicked.connect(self._on_update_clicked)
+            self._update_btn.hide()
+            top_row.addWidget(self._update_btn)
+            top_row.addSpacing(6)
 
         self._notif_btn = QPushButton("🔔 إشعارات")
         self._notif_btn.setFixedHeight(34)
@@ -619,7 +657,212 @@ class MainWindow(QMainWindow):
         bottom_row.addStretch()
         layout.addLayout(bottom_row)
 
+        # Wide red bar at the very bottom of the main screen. Used to show a
+        # prominent message after a self-update succeeds (and anything else the
+        # developer wants to highlight). Toggled via _show_update_bar().
+        self._update_bar = QLabel("")
+        self._update_bar.setFixedHeight(44)
+        self._update_bar.setAlignment(Qt.AlignCenter)
+        self._update_bar.setWordWrap(False)
+        self._update_bar.setStyleSheet("""
+            QLabel {
+                background: #d32f2f; color: white; font-size: 15px;
+                font-weight: bold; border-radius: 6px;
+                padding: 8px;
+            }
+        """)
+        self._update_bar.hide()
+        layout.addWidget(self._update_bar)
+
+        # If the app was just self-updated, show the red bar on this launch.
+        self._consume_update_notice()
+
         return widget, welcome_label, profile_label, btn_login, btn_register
+
+    def _show_update_bar(self, message, red=True):
+        """Show the wide bottom bar with a message (default red)."""
+        if self._update_bar is None:
+            return
+        bar = self._update_bar
+        bar.setText(message)
+        bar.setStyleSheet("""
+            QLabel {
+                background: %s; color: white; font-size: 15px;
+                font-weight: bold; border-radius: 6px; padding: 8px;
+            }
+        """ % ("#d32f2f" if red else "#1e88e5"))
+        bar.show()
+
+    def _hide_update_bar(self):
+        if self._update_bar is not None:
+            self._update_bar.hide()
+
+    # ── Self-update handling ─────────────────────────────────────────────
+    def _check_for_update_bg(self):
+        """Background check via core/updater; toggles the update button."""
+        if self._update_ctx is None or self._update_btn is None:
+            return
+        try:
+            from core import updater
+            info = updater.check_for_update(
+                self._update_ctx.get("version"),
+                repo=self._update_ctx.get("repo"),
+            )
+        except Exception:
+            info = None
+        self._update_info = info if info else None
+        if info:
+            self._update_btn.show()
+        else:
+            self._update_btn.hide()
+
+    def _on_update_clicked(self):
+        """Download + install + relaunch. Only enabled in the packaged app."""
+        from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtCore import Qt
+
+        if self._update_btn is None:
+            return
+        info = self._update_info or {}
+        new_ver = info.get("version", "")
+
+        # If somehow invoked without a frozen exe, just open the download page.
+        import sys as _sys
+        if not getattr(_sys, "frozen", False):
+            import webbrowser
+            webbrowser.open(self._update_ctx.get("download_page", ""))
+            return
+
+        # Refresh once more right before updating so we don't act on stale data.
+        from core import updater
+        fresh = updater.check_for_update(
+            self._update_ctx.get("version"),
+            repo=self._update_ctx.get("repo"),
+        )
+        if not fresh:
+            QMessageBox.information(self, "التحديث",
+                                    "لا يوجد تحديث جديد متاح حالياً.")
+            self._update_btn.hide()
+            return
+        self._update_info = fresh
+        new_ver = fresh.get("version", "")
+
+        box = QMessageBox(self)
+        box.setWindowTitle("تحديث التطبيق")
+        box.setIcon(QMessageBox.Information)
+        box.setText(f"نسخة جديدة متاحة: {new_ver}")
+        box.setInformativeText(
+            "سيتم تنزيل النسخة الجديدة وتثبيتها تلقائياً.\n"
+            "سيُغلق التطبيق أثناء التثبيت ويعاد فتحه تلقائياً.\n"
+            "لن تُمس بياناتك."
+        )
+        box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        box.setDefaultButton(QMessageBox.Ok)
+        if box.exec() != QMessageBox.Ok:
+            return
+
+        # Show a small progress dialog while downloading; then quit.
+        from PySide6.QtWidgets import QDialog, QLabel, QVBoxLayout
+        from PySide6.QtCore import QThread
+
+        class _Progress(QDialog):
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self.setWindowTitle("تحديث التطبيق")
+                self.setModal(True)
+                self.setFixedWidth(360)
+                lay = QVBoxLayout(self)
+                self.lbl = QLabel("جاري تنزيل النسخة الجديدة...")
+                self.lbl.setStyleSheet("font-size: 14px; padding: 15px;")
+                self.lbl.setAlignment(Qt.AlignCenter)
+                lay.addWidget(self.lbl)
+
+        class _Worker(QThread):
+            error = None
+            result = False
+
+            def run(self):
+                try:
+                    self.result = updater.apply_update(fresh)
+                except Exception as e:
+                    self.error = e
+
+        dlg = _Progress(self)
+        worker = _Worker(self)
+        # Keep a strong reference so the QThread isn't garbage-collected while
+        # the download is still running in the background.
+        self._update_worker = worker
+        worker.finished.connect(lambda: self._on_update_worker_done(worker, dlg))
+        dlg.show()
+        worker.start()
+
+    def _on_update_worker_done(self, worker, dlg):
+        from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtCore import QTimer
+        self._update_worker = None
+        dlg.close()
+        if worker.error or not worker.result:
+            QMessageBox.warning(self, "التحديث",
+                                "تعذر تنزيل أو تثبيت التحديث.\n"
+                                "تحقق من اتصالك بالإنترنت ثم أعد المحاولة.\n\n"
+                                "بدلاً من ذلك يمكنك تنزيل النسخة الجديدة يدوياً من صفحة التحميل.")
+            return
+        # Helper is running; closing the app lets it swap + relaunch.
+        self._update_btn.hide()
+        # Record a "just updated" notice so the relaunched app can show the
+        # wide red bar on next launch.
+        new_ver = (self._update_info or {}).get("version", "")
+        try:
+            self._write_update_notice(f"تم تحديث التطبيق إلى الإصدار {new_ver}")
+        except Exception:
+            pass
+        QTimer.singleShot(0, self.close)
+
+    def _update_notice_path(self):
+        # Store the notice next to the real data folder, which survives a
+        # relaunch (next to the exe when frozen, next to the source tree in dev).
+        base = (os.path.dirname(sys.executable) if getattr(sys, 'frozen', False)
+                else os.path.dirname(os.path.dirname(__file__)))
+        return os.path.join(base, 'data', 'update_notice.txt')
+
+    def _write_update_notice(self, message):
+        p = self._update_notice_path()
+        if not p:
+            return
+        from PySide6.QtCore import QSettings
+        # Also keep in registry as a robust fallback.
+        QSettings("ورشة طباعة", "App").setValue("update_notice", message)
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write(message)
+        except OSError:
+            pass
+
+    def _consume_update_notice(self):
+        """Read any pending update notice; show the red bar and clear it."""
+        if self._update_bar is None:
+            return
+        if self._update_ctx is None:
+            return
+        msg = None
+        from PySide6.QtCore import QSettings
+        s = QSettings("ورشة طباعة", "App")
+        msg = s.value("update_notice", "", type=str)
+        p = self._update_notice_path()
+        if p and os.path.exists(p):
+            try:
+                with open(p, encoding='utf-8') as f:
+                    msg = f.read()
+                os.remove(p)
+            except OSError:
+                pass
+        s.remove("update_notice")
+        if msg:
+            self._show_update_bar(msg)
+            # Auto-hide after 12 seconds.
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(12000, self._hide_update_bar)
 
     def _build_login_page(self):
         widget = QWidget()
@@ -851,26 +1094,44 @@ class MainWindow(QMainWindow):
         api_client.set_token(token)
         api_client.set_token_id(sess.get("token_id"))
         api_client.set_username(username)
-        from core.database import api_check_auth
-        qdata, qerr = api_check_auth(suppress_expired=True)
-        if qerr:
-            self._logged_in = True
-            self._username = username
-            self._display_name = sess.get("display_name", username)
-            self._is_admin = sess.get("is_admin", False)
-            self._subscription_required = bool(sess.get("subscription_required", True))
-            self._api_data = {}
-            self._update_auth_ui()
-            self._switch_to_main()
-            logger.info("استعادة جلسة سابقة (التحقق فشل): %s — %s", username, qerr)
-            QTimer.singleShot(3000, self._load_notifications)
-            return True
+        # دخول فوري من الجلسة المحفوظة دون انتظار الشبكة
         self._logged_in = True
         self._username = username
         self._display_name = sess.get("display_name", username)
         self._is_admin = sess.get("is_admin", False)
-        self._subscription_required = bool(qdata.get("subscription_required", True))
+        self._subscription_required = bool(sess.get("subscription_required", True))
+        self._api_data = {}
+        self._update_auth_ui()
+        self._switch_to_main()
+        logger.info("استعادة جلسة سابقة (فورية): %s", username)
+        QTimer.singleShot(0, self._verify_session_bg)
+        return True
+
+    def _verify_session_bg(self):
+        import threading
+        t = threading.Thread(target=self._verify_session_worker, daemon=True, name="session-verify")
+        t.start()
+
+    def _verify_session_worker(self):
+        from core.database import api_check_auth
+        try:
+            qdata, qerr = api_check_auth(suppress_expired=True)
+        except Exception as e:
+            qdata, qerr = None, str(e)
+        _startup_signals.session_finished.emit(qdata, qerr)
+
+    def _on_session_verify(self, qdata, qerr):
+        if qerr:
+            logger.warning("استعادة جلسة سابقة (التحقق فشل): %s — %s", self._username, qerr)
+            QTimer.singleShot(3000, self._load_notifications)
+            return
+        if not qdata:
+            QTimer.singleShot(500, self._load_notifications)
+            return
         self._api_data = qdata
+        self._display_name = qdata.get("shop_name", self._username)
+        self._is_admin = qdata.get("is_admin", False)
+        self._subscription_required = bool(qdata.get("subscription_required", True))
         self._update_auth_ui()
         self._switch_to_main()
         self._update_banners()
@@ -883,8 +1144,7 @@ class MainWindow(QMainWindow):
                 from core.database import api_clear_pending
                 api_clear_pending()
         QTimer.singleShot(500, self._load_notifications)
-        logger.info("استعادة جلسة سابقة: %s", username)
-        return True
+        logger.info("اكتمل التحقق من الجلسة: %s", self._username)
 
     def _on_session_expired(self):
         self._clear_session()
@@ -932,9 +1192,15 @@ class MainWindow(QMainWindow):
     def _send_heartbeat(self):
         if not self._logged_in or not self._use_api:
             return
+        import threading
+        t = threading.Thread(target=self._heartbeat_worker, daemon=True, name="heartbeat")
+        t.start()
+
+    def _heartbeat_worker(self):
         try:
             from core.api_client import get_server_url, get_token
             import requests
+            import time
             url = f"{get_server_url()}/api/auth/check"
             token = get_token()
             if not token:
@@ -947,7 +1213,6 @@ class MainWindow(QMainWindow):
                         return
                     if resp.status_code in (502, 503, 504) and attempt < 2:
                         logger.info("Heartbeat: server waking up (status %s), retry %d/3", resp.status_code, attempt + 1)
-                        import time
                         time.sleep(5)
                         continue
                     logger.warning("Heartbeat failed: status %s", resp.status_code)
@@ -955,7 +1220,6 @@ class MainWindow(QMainWindow):
                 except requests.ConnectionError:
                     if attempt < 2:
                         logger.info("Heartbeat: connection failed, retry %d/3", attempt + 1)
-                        import time
                         time.sleep(5)
                         continue
                     logger.warning("Heartbeat: cannot connect after 3 attempts")
@@ -963,7 +1227,6 @@ class MainWindow(QMainWindow):
                 except requests.Timeout:
                     if attempt < 2:
                         logger.info("Heartbeat: timeout, retry %d/3", attempt + 1)
-                        import time
                         time.sleep(5)
                         continue
                     logger.warning("Heartbeat: timeout after 3 attempts")
@@ -1194,12 +1457,24 @@ class MainWindow(QMainWindow):
 
     def _update_banners(self):
         if self._use_api:
-            from core.database import api_get_banners
+            import threading
+            t = threading.Thread(target=self._banners_worker, daemon=True, name="banners")
+            t.start()
+            return
+        banners = self._users.get("ahmed", {})
+        self._apply_banners(banners, None)
+
+    def _banners_worker(self):
+        from core.database import api_get_banners
+        try:
             banners, err = api_get_banners()
-            if err or not banners:
-                return
-        else:
-            banners = self._users.get("ahmed", {})
+        except Exception as e:
+            banners, err = None, str(e)
+        _startup_signals.banners_finished.emit(banners, err)
+
+    def _apply_banners(self, banners, err):
+        if err or not banners:
+            return
         for side, label, link_label in [
             ("left", self._banner_left_label, self._banner_left_link),
             ("right", self._banner_right_label, self._banner_right_link),

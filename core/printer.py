@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 A4_WIDTH_MM = 210
 A4_HEIGHT_MM = 297
 
+NO_PRINT_KEY = 1000
+
 _settings = QSettings("ورشة طباعة", "Printer")
 _selected_printer_name = _settings.value("default_printer", None)
 _last_paper_type = _settings.value("last_paper_type", None)
@@ -168,6 +170,24 @@ def print_scene(parent: QWidget, scenes, copies: int = 1, page_count: int = 1, d
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    print_scenes = [scene] if isinstance(scenes, QGraphicsScene) else [sc for sc in scenes]
+    hidden_by_scene = {}
+    for sc in print_scenes:
+        if sc is None:
+            continue
+        try:
+            sc._printing = True
+        except Exception:
+            pass
+        hidden = []
+        try:
+            for item in sc.items():
+                if item.data(NO_PRINT_KEY) and item.isVisible():
+                    item.setVisible(False)
+                    hidden.append(item)
+        except Exception:
+            pass
+        hidden_by_scene[sc] = hidden
     try:
         page_rect = printer.pageRect(QPrinter.Millimeter)
         scale_x = page_rect.width() / A4_WIDTH_MM
@@ -190,4 +210,14 @@ def print_scene(parent: QWidget, scenes, copies: int = 1, page_count: int = 1, d
     except Exception as e:
         logger.error("فشل الطباعة", exc_info=True)
     finally:
+        for sc, hidden in hidden_by_scene.items():
+            try:
+                sc._printing = False
+            except Exception:
+                pass
+            for item in hidden:
+                try:
+                    item.setVisible(True)
+                except Exception:
+                    pass
         painter.end()

@@ -55,7 +55,7 @@ from PIL import Image
 import numpy as np
 import cv2
 
-from core.printer import print_scene, get_selected_printer_name, set_printer_name, PAPER_TYPES, PAPER_TYPE_NAMES, get_last_paper_type, set_last_paper_type
+from core.printer import print_scene, get_selected_printer_name, set_printer_name, PAPER_TYPES, PAPER_TYPE_NAMES, get_last_paper_type, set_last_paper_type, NO_PRINT_KEY
 
 
 
@@ -87,7 +87,9 @@ MARGIN = 5
 
 
 
-CARD_GAP = 10
+ROW_GAP = 2
+
+COL_GAP = 10
 
 
 
@@ -95,7 +97,7 @@ CARDS_PER_ROW = 2
 
 
 
-MAX_ROWS = (A4_H - 2 * MARGIN + CARD_GAP) // (CARD_H + CARD_GAP)
+MAX_ROWS = (A4_H - 2 * MARGIN + ROW_GAP) // (CARD_H + ROW_GAP)
 
 
 
@@ -148,6 +150,7 @@ class A4GraphicsView(QGraphicsView):
 
 
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
 
 
 
@@ -1145,6 +1148,9 @@ class _CropOverlay(QWidget):
         self._offset_x = 0
         self._offset_y = 0
         self._drawing_pixmap = None
+        self._display_pixmap = None
+        self._cache_key = None
+        self._duplicate_tolerance = 8.0
         self.setMinimumSize(200, 200)
         self.setCursor(Qt.CrossCursor)
 
@@ -1159,6 +1165,14 @@ class _CropOverlay(QWidget):
         self._points.clear()
         self.update()
 
+    def _cached_display(self):
+        key = (self.size(), self._drawing_pixmap.cacheKey())
+        if self._cache_key != key:
+            self._display_pixmap = self._drawing_pixmap.scaled(
+                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self._cache_key = key
+        return self._display_pixmap
+
     def get_original_points(self):
         result = []
         for pt in self._points:
@@ -1170,16 +1184,24 @@ class _CropOverlay(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and len(self._points) < self._max_points:
             from PySide6.QtCore import QPointF
-            self._points.append(QPointF(event.position().x(), event.position().y()))
+            new_pt = QPointF(event.position().x(), event.position().y())
+            if self._points:
+                last = self._points[-1]
+                if (new_pt - last).manhattanLength() < self._duplicate_tolerance:
+                    event.accept()
+                    return
+            self._points.append(new_pt)
             self.update()
             event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        event.accept()
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         if self._drawing_pixmap and not self._drawing_pixmap.isNull():
-            scaled = self._drawing_pixmap.scaled(
-                self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled = self._cached_display()
             sx = self.width() - scaled.width()
             sy = self.height() - scaled.height()
             self._offset_x = sx // 2
@@ -1593,7 +1615,9 @@ class A4Editor(QWidget):
 
 
 
-        self.scene.addRect(0, y0, A4_W, A4_H, QPen(Qt.black), QBrush(Qt.white)).setZValue(-1)
+        page_rect = self.scene.addRect(0, y0, A4_W, A4_H, QPen(Qt.black), QBrush(Qt.white))
+        page_rect.setZValue(-1)
+        page_rect.setData(NO_PRINT_KEY, True)
 
 
 
@@ -1617,15 +1641,16 @@ class A4Editor(QWidget):
 
 
 
-                self.scene.addRect(x, y, CARD_W, CARD_H, pen)
+                slot = self.scene.addRect(x, y, CARD_W, CARD_H, pen)
+                slot.setData(NO_PRINT_KEY, True)
 
 
 
-                y += CARD_H + CARD_GAP
+                y += CARD_H + ROW_GAP
 
 
 
-            x += CARD_W + CARD_GAP
+            x += CARD_W + COL_GAP
 
 
 
@@ -2688,11 +2713,11 @@ class A4Editor(QWidget):
 
 
 
-        x = MARGIN + col * (CARD_W + CARD_GAP)
+        x = MARGIN + col * (CARD_W + COL_GAP)
 
 
 
-        y = y_offset + MARGIN + row * (CARD_H + CARD_GAP)
+        y = y_offset + MARGIN + row * (CARD_H + ROW_GAP)
 
 
 
@@ -2982,7 +3007,7 @@ class A4Editor(QWidget):
 
 
 
-            bg_items = [it for it in self.scene.items() if it.zValue() < 0]
+            bg_items = [it for it in self.scene.items() if it.data(NO_PRINT_KEY) and it.isVisible()]
 
 
 
@@ -3069,7 +3094,7 @@ class A4Editor(QWidget):
 
 
 
-            bg_items = [it for it in self.scene.items() if it.zValue() < 0]
+            bg_items = [it for it in self.scene.items() if it.data(NO_PRINT_KEY) and it.isVisible()]
 
 
 
@@ -3085,6 +3110,10 @@ class A4Editor(QWidget):
 
 
 
+            try:
+                self.scene._printing = True
+            except Exception:
+                pass
             printer.setOutputFormat(QPrinter.PdfFormat)
 
 
@@ -3202,6 +3231,11 @@ class A4Editor(QWidget):
 
 
                 painter.end()
+
+                try:
+                    self.scene._printing = False
+                except Exception:
+                    pass
 
 
 
