@@ -265,6 +265,14 @@ def get_all_users_with_activity():
     """))
     rows = cur.fetchall()
     cols = [d[0] for d in cur.description]
+    cur.execute(_q("SELECT username, end_date FROM subscriptions WHERE end_date >= %s"), (today,))
+    sub_rows = cur.fetchall()
+    remaining_map = {}
+    for username, end_str in sub_rows:
+        end = date.fromisoformat(end_str)
+        remaining = (end - date.today()).days
+        if remaining > 0:
+            remaining_map[username] = remaining_map.get(username, 0) + remaining
     result = []
     for r in rows:
         d = dict(zip(cols, r))
@@ -278,6 +286,7 @@ def get_all_users_with_activity():
             d["status"] = "active"
         d["used_today"] = bool(last_seen and last_seen.startswith(today))
         d["is_connected"] = bool(last_seen and last_seen >= eight_hours_ago)
+        d["remaining_days"] = remaining_map.get(d["username"], 0)
         result.append(d)
     cur.close()
     conn.close()
