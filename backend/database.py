@@ -268,11 +268,21 @@ def get_all_users_with_activity():
     cur.execute(_q("SELECT username, end_date FROM subscriptions WHERE end_date >= %s"), (today,))
     sub_rows = cur.fetchall()
     remaining_map = {}
-    for username, end_str in sub_rows:
-        end = date.fromisoformat(end_str)
-        remaining = (end - date.today()).days
-        if remaining > 0:
-            remaining_map[username] = remaining_map.get(username, 0) + remaining
+    for username, end_val in sub_rows:
+        try:
+            if isinstance(end_val, datetime):
+                end = end_val.date()
+            elif isinstance(end_val, date):
+                end = end_val
+            elif end_val:
+                end = date.fromisoformat(str(end_val)[:10])
+            else:
+                continue
+            remaining = (end - date.today()).days
+            if remaining > 0:
+                remaining_map[username] = remaining_map.get(username, 0) + remaining
+        except Exception:
+            continue
     result = []
     for r in rows:
         d = dict(zip(cols, r))
@@ -521,11 +531,21 @@ def compute_remaining_days(username):
     cur.close()
     conn.close()
     total = 0
-    for (end_str,) in rows:
-        end = date.fromisoformat(end_str)
-        remaining = (end - date.today()).days
-        if remaining > 0:
-            total += remaining
+    for (end_val,) in rows:
+        try:
+            if isinstance(end_val, datetime):
+                end = end_val.date()
+            elif isinstance(end_val, date):
+                end = end_val
+            elif end_val:
+                end = date.fromisoformat(str(end_val)[:10])
+            else:
+                continue
+            remaining = (end - date.today()).days
+            if remaining > 0:
+                total += remaining
+        except Exception:
+            continue
     return total
 
 
@@ -704,7 +724,7 @@ def get_notifications_for_user(username):
     conn = _conn()
     cur = conn.cursor()
     cur.execute(_q(
-        "SELECT n.*, EXISTS(SELECT 1 FROM notification_reads r WHERE r.notification_id = n.id AND r.username = %s) AS is_read "
+        "SELECT n.*, EXISTS(SELECT 1 FROM notification_reads r WHERE CAST(r.notification_id AS TEXT) = CAST(n.id AS TEXT) AND r.username = %s) AS is_read "
         "FROM notifications n ORDER BY n.id DESC"
     ), (username,))
     rows = cur.fetchall()
@@ -723,7 +743,7 @@ def get_unread_notifications_count(username):
     cur = conn.cursor()
     cur.execute(_q(
         "SELECT COUNT(*) FROM notifications n "
-        "WHERE NOT EXISTS (SELECT 1 FROM notification_reads r WHERE r.notification_id = n.id AND r.username = %s)"
+        "WHERE NOT EXISTS (SELECT 1 FROM notification_reads r WHERE CAST(r.notification_id AS TEXT) = CAST(n.id AS TEXT) AND r.username = %s)"
     ), (username,))
     row = cur.fetchone()
     cur.close()
@@ -793,7 +813,7 @@ def get_notification_replies():
         "u.shop_name, n.text AS notification_text, n.question AS notification_question "
         "FROM notification_replies r "
         "LEFT JOIN users u ON u.username = r.username "
-        "LEFT JOIN notifications n ON n.id = r.notification_id "
+        "LEFT JOIN notifications n ON CAST(n.id AS TEXT) = CAST(r.notification_id AS TEXT) "
         "ORDER BY r.id DESC"
     ))
     rows = cur.fetchall()
