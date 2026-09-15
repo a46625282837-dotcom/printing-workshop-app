@@ -223,6 +223,47 @@ def update_last_seen(username):
     conn.close()
 
 
+def _parse_end_date(val):
+    """Return a date from the many possible formats stored in end_date, or None."""
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    if not val:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    s = s.replace("/", "-")
+    s = s.split(" ")[0].split("T")[0]
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except (ValueError, TypeError):
+            continue
+    try:
+        return date.fromisoformat(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _active_subscription_usernames(conn, cur):
+    """Map of username -> remaining days for subscriptions valid on/after today, tolerant of any end_date format."""
+    try:
+        cur.execute(_q("SELECT username, end_date FROM subscriptions"))
+    except Exception:
+        return {}
+    today = date.today()
+    result = {}
+    for username, end_val in cur.fetchall():
+        end = _parse_end_date(end_val)
+        if end:
+            remaining = (end - today).days
+            if remaining > 0:
+                result[username] = max(result.get(username, 0), remaining)
+    return result
+
+
 def get_admin_user_stats():
     conn = _conn()
     cur = conn.cursor()
@@ -240,11 +281,12 @@ def get_admin_user_stats():
     cur.execute(_q("SELECT COUNT(DISTINCT username) FROM user_sessions WHERE created_at >= %s"), (today,))
     row_active = cur.fetchone()
     today_active = row_active[0] if row_active and row_active[0] else today_count
+    active_subs = len(_active_subscription_usernames(conn, cur))
     cur.close()
-    conn.close()
     return {
         "total_users": total_users,
         "today_active": today_active,
+        "active_subs": active_subs,
         "inactive_30d": inactive_count,
         "never_active": never_active,
     }
@@ -265,24 +307,8 @@ def get_all_users_with_activity():
     """))
     rows = cur.fetchall()
     cols = [d[0] for d in cur.description]
-    cur.execute(_q("SELECT username, end_date FROM subscriptions WHERE end_date >= %s"), (today,))
-    sub_rows = cur.fetchall()
-    remaining_map = {}
-    for username, end_val in sub_rows:
-        try:
-            if isinstance(end_val, datetime):
-                end = end_val.date()
-            elif isinstance(end_val, date):
-                end = end_val
-            elif end_val:
-                end = date.fromisoformat(str(end_val)[:10])
-            else:
-                continue
-            remaining = (end - date.today()).days
-            if remaining > 0:
-                remaining_map[username] = remaining_map.get(username, 0) + remaining
-        except Exception:
-            continue
+    sub_rows = _active_subscription_usernames(conn, cur)
+    remaining_map = sub_rows
     result = []
     for r in rows:
         d = dict(zip(cols, r))
