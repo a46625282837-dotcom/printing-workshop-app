@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
 
-datas = [('ui', 'ui'), ('core', 'core'), ('img', 'img')]
+datas = [('ui', 'ui'), ('core', 'core'), ('img', 'img'), ('models', 'models')]
 datas += [d for d in collect_data_files('cv2')
           if 'videoio_ffmpeg' not in d[0].replace('\\', '/')]
 datas += collect_data_files('mediapipe')
@@ -20,6 +20,10 @@ datas += collect_data_files('mediapipe')
 _HEAVY_EXCLUDES = [
     'torch', 'torchvision', 'gfpgan', 'realesrgan', 'basicsr', 'facexlib',
     'scipy', 'numba', 'llvmlite', 'matplotlib', 'pytest', 'IPython',
+    # ultralytics trains models only; it drags polars (187 MB runtime) and
+    # hf-xet into the app although runtime detection uses card_detector.onnx.
+    'ultralytics', 'polars', 'polars-runtime-32', 'polars_lts', 'hf_xet',
+    'huggingface_hub', 'tiktoken',
 ]
 
 

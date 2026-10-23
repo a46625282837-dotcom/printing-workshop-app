@@ -1,29 +1,36 @@
 import logging
 import os
-import sys
+import re
 import webbrowser
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
-                               QPushButton, QLabel, QHBoxLayout,
+                               QPushButton, QLabel, QHBoxLayout, QGridLayout,
                                QStackedWidget, QLineEdit, QMessageBox,
                                QTableWidget, QTableWidgetItem, QHeaderView,
                                QFileDialog, QInputDialog, QDateEdit, QFrame,
                                QDialog, QApplication, QProgressBar,
                                QComboBox, QPlainTextEdit)
 from PySide6.QtGui import QAction
-from PySide6.QtCore import Qt, QSize, Signal, QDate, QTimer, QObject
-from PySide6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QBrush, QFont
+from PySide6.QtCore import Qt, QSize, QRectF, Signal, QDate, QTimer, QObject
+from PySide6.QtGui import QAction, QIcon, QColor, QPixmap, QPainter, QBrush, QFont, QPainterPath, QPen, QImage
 from PySide6.QtWidgets import QGraphicsDropShadowEffect, QLayout, QLayoutItem, QScrollArea
 from datetime import date, timedelta
 
 from ui.a4_editor import A4Editor
 from ui.photo_editor import PhotoEditor
-from ui.pdf_editor import PdfEditor
+from ui.print_files import PrintFilesEditor
+from ui.documents_editor import DocumentsEditor
 from ui.text_editor import TextEditor
 from ui.scanner_page import ScannerPage
+from ui import theme
 
 def _img_path(rel):
-    base = getattr(sys, '_MEIPASS', os.path.join(os.path.dirname(__file__), '..'))
-    return os.path.join(base, 'img', rel)
+    from core.runtime import resource_path
+    return resource_path(f'img/{rel}')
+
+
+def _img_dir():
+    from core.runtime import resource_path
+    return resource_path('img')
 
 IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff'}
 _NO_SUB_MSG = "يجب أن تشترك قبل الاستخدام. تواصل مع المالك: واتساب 07865402819"
@@ -34,6 +41,12 @@ logger = logging.getLogger(__name__)
 class _StartupSignals(QObject):
     session_finished = Signal(object, object)
     banners_finished = Signal(object, object)
+    refresh_finished = Signal(object, object)
+    notifications_finished = Signal(object, object)
+    login_finished = Signal(object, object, bool)
+    register_finished = Signal(object, object, object)
+    dashboard_finished = Signal(object, object)
+    session_expired = Signal()
 
 
 _startup_signals = _StartupSignals()
@@ -165,36 +178,97 @@ class PlusButton(QPushButton):
         self._sz = 120
         self.setFixedSize(self._sz, self._sz)
         self.setToolTip(tooltip)
-        self.setStyleSheet("""
-            QPushButton {
-                background: #f0f0f0;
-                border: 3px solid #ccc;
-                border-radius: 20px;
-            }
-            QPushButton:hover {
-                border-color: #1a73e8;
-                border-width: 3px;
-                background: #e8f0fe;
-            }
-            QPushButton:disabled {
-                opacity: 0.4;
-                border-color: #ddd;
-            }
-        """ + (FUTURE_STYLE if not enabled else ""))
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFlat(True)
+        self.setStyleSheet("QPushButton { background: transparent; border: none; }")
+        self._cover = QPixmap()
+        self._hover = False
         self.setEnabled(enabled)
         self.clicked.connect(callback)
 
+    def set_cover_image(self, path):
+        """شحن غلاف الزر بجودة عالية: يُقص الصورة لمربع ويُحفظ مصدرها الأصلي،
+        ثم تُنتَج نسخة عاملة بالحجم الدقيق لكل حجم زر بـ LANCZOS قبل الرسم
+        فلا يحدث أي تحجيم أثناء الرسم (الصور تبقى حادة)"""
+        self._master = None
+        self._cover = QPixmap()
+        try:
+            from PIL import Image
+            im = Image.open(path).convert('RGB')
+            w, h = im.size
+            side = min(w, h)
+            self._master = im.crop(((w - side) // 2, (h - side) // 2,
+                                    (w + side) // 2, (h + side) // 2))
+            self._render_at(self._sz)
+        except Exception:
+            try:
+                self._cover = QPixmap(path)
+            except Exception:
+                self._cover = QPixmap()
+            self.update()
+
+    def _render_at(self, size):
+        if self._master is None:
+            return
+        try:
+            from PIL import Image, ImageFilter
+            dpr = self.devicePixelRatioF() or 1.0
+            px = max(24, int(round(size * dpr)))
+            im = self._master.resize((px, px), Image.LANCZOS)
+            im = im.filter(ImageFilter.UnsharpMask(radius=2, percent=75, threshold=2))
+            qimg = QImage(im.tobytes(), px, px, px * 3,
+                          QImage.Format_RGB888).copy()
+            pm = QPixmap.fromImage(qimg)
+            pm.setDevicePixelRatio(dpr)
+            self._cover = pm
+        except Exception:
+            pass
+
+    def set_card_size(self, size):
+        size = max(36, int(size))
+        self._sz = size
+        self.setFixedSize(size, size)
+        self._render_at(size)
+        self.update()
+
     def enterEvent(self, event):
-        inset = 6
-        self.setIconSize(QSize(self._sz - inset, self._sz - inset))
+        self._hover = True
+        self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        self.setIconSize(QSize(self._sz, self._sz))
+        self._hover = False
+        self.update()
         super().leaveEvent(event)
 
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(self.rect())
+        radius = min(16, int(rect.width() * 0.16))
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        if not self._cover.isNull():
+            self._cover.setDevicePixelRatio(self.devicePixelRatioF() or 1.0)
+            p.setClipPath(path)
+            p.drawPixmap(0, 0, self._cover)
+            if not self.isEnabled():
+                p.fillPath(path, QColor(255, 255, 255, 150))
+        else:
+            p.fillPath(path, QColor(240, 240, 240))
+        if self._hover:
+            p.fillPath(path, QColor(26, 115, 232, 36))
+            p.setPen(QPen(QColor("#1a73e8"), 3))
+        else:
+            p.setPen(QPen(QColor(200, 200, 200), 2))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(path)
+        if self.isEnabled():
+            p.drawText(rect, Qt.AlignCenter, "")
+        p.end()
 
-def _make_card(label_text, button, parent_layout):
+
+def _make_card(label_text, button, parent_layout, grid_index=None, grid_cols=3):
     col = QVBoxLayout()
     col.setAlignment(Qt.AlignCenter)
     col.addWidget(button)
@@ -202,7 +276,11 @@ def _make_card(label_text, button, parent_layout):
     lbl.setAlignment(Qt.AlignCenter)
     lbl.setStyleSheet("font-size: 12px; color: #555;")
     col.addWidget(lbl)
-    parent_layout.addLayout(col)
+    if isinstance(parent_layout, QGridLayout) and grid_index is not None:
+        parent_layout.addLayout(col, grid_index // grid_cols, grid_index % grid_cols)
+    else:
+        parent_layout.addLayout(col)
+    return lbl
 
 
 def _make_eye_pixmap(open_eye=True):
@@ -240,6 +318,9 @@ def _make_password_field(placeholder_text, font_size="14px", padding="8px"):
     return line, line
 
 
+from version import APP_VERSION
+
+
 class MainWindow(QMainWindow):
     def __init__(self, use_api=False, update_ctx=None):
         super().__init__()
@@ -257,11 +338,12 @@ class MainWindow(QMainWindow):
         self.resize(max(600, int(desired_w)), max(520, int(desired_h)))
         self._banner_w = int(240 * self._scale)
         self._banner_h = int(320 * self._scale)
+        self._banners_visible = True
         if use_api:
             from core.database import set_api_mode
             from core.api_client import set_session_expired_callback
             set_api_mode(True)
-            set_session_expired_callback(self._on_session_expired)
+            set_session_expired_callback(self._on_session_expired_from_anywhere)
             self._users = {}
             self._api_data = None
         else:
@@ -270,9 +352,10 @@ class MainWindow(QMainWindow):
             self._users = load_users()
             self._subscription_required = get_subscription_required()
         if not use_api:
-            if "ahmed" not in self._users:
+            _admin_pw = os.environ.get("IDCARD_ADMIN_PASSWORD", "").strip()
+            if _admin_pw and "ahmed" not in self._users:
                 self._users["ahmed"] = {
-                    "password": "Aa511F511fa", "shop_name": "المالك",
+                    "password": _admin_pw, "shop_name": "المالك",
                     "phone": "", "reg_date": date.today().strftime("%Y-%m-%d"),
                     "subscription_days": 9999, "is_admin": True,
                     "profile_pixmap": None,
@@ -280,11 +363,12 @@ class MainWindow(QMainWindow):
                     "subscriptions": [],
                 }
                 save_user("ahmed", self._users["ahmed"])
-            admin = self._users.setdefault("ahmed", {})
-            admin.setdefault("banner_left_pixmap", None)
-            admin.setdefault("banner_right_pixmap", None)
-            admin.setdefault("banner_left_link", "")
-            admin.setdefault("banner_right_link", "")
+            admin = self._users.get("ahmed")
+            if admin is not None:
+                admin.setdefault("banner_left_pixmap", None)
+                admin.setdefault("banner_right_pixmap", None)
+                admin.setdefault("banner_left_link", "")
+                admin.setdefault("banner_right_link", "")
         self._logged_in = False
         self._username = ""
         self._display_name = ""
@@ -297,27 +381,15 @@ class MainWindow(QMainWindow):
         self._welcome_label.clicked.connect(self._open_profile)
         self._profile_label.clicked.connect(self._open_profile)
         self._stack.addWidget(self._main_widget)
-        self._editor = A4Editor()
-        self._editor.subscription_check = lambda: self._require_subscription()
-        self._editor.go_back.connect(self._switch_to_main)
-        self._stack.addWidget(self._editor)
-        self._photo_editor = PhotoEditor()
-        self._photo_editor.subscription_check = lambda: self._require_subscription()
-        self._photo_editor.go_back.connect(self._switch_to_main)
-        self._stack.addWidget(self._photo_editor)
-        self._pdf_editor = PdfEditor()
-        self._pdf_editor.subscription_check = lambda: self._require_subscription()
-        self._pdf_editor.go_back.connect(self._switch_to_main)
-        self._stack.addWidget(self._pdf_editor)
-        self._text_editor = TextEditor()
-        self._text_editor.subscription_check = lambda: self._require_subscription()
-        self._text_editor.go_back.connect(self._switch_to_main)
+        # المحررات تُنشأ بتكاسل (عند أول فتح للقسم فقط) بدل بناء كل شيء عند
+        # الإقلاع. تُحجز فتحاتها بمواضع ثابتة (1..6) بواجهات فارغة رخيصة حتى
+        # لا تتغير أرقام الصفحات: 1=هوية، 2=صور، 3=PDF، 4=وثائق، 5=نصوص، 6=سكنر.
+        for _ in range(6):
+            placeholder = QWidget()
+            placeholder.setObjectName("_editor_placeholder")
+            self._stack.addWidget(placeholder)
+        self._lazy_editors = {}
         self._pending_file = None
-        self._stack.addWidget(self._text_editor)
-        self._scanner_page = ScannerPage()
-        self._scanner_page.subscription_check = lambda: self._require_subscription()
-        self._scanner_page.go_back.connect(self._switch_to_main)
-        self._stack.addWidget(self._scanner_page)
         self._login_widget = self._build_login_page()
         self._stack.addWidget(self._login_widget)
         self._register_widget = self._build_register_page()
@@ -342,6 +414,19 @@ class MainWindow(QMainWindow):
         self._notif_list = []
         self._notif_unread = 0
         self._notif_processing = False
+        self._refresh_running = False
+        self._notif_fetching = False
+        self._notif_fetch_pending = False
+        self._login_busy = False
+        self._login_stage = 0
+        self._sub_pending = False
+        self._login_pending_username = ""
+        self._login_pending_password = ""
+        self._register_busy = False
+        self._register_display_name = ""
+        self._register_fields = None
+        self._dash_fetching = False
+        self._dash_pending = False
         self._notif_timer = QTimer(self)
         self._notif_timer.setInterval(60000)
         self._notif_timer.timeout.connect(self._on_notif_timer)
@@ -362,14 +447,26 @@ class MainWindow(QMainWindow):
         self._heartbeat_timer.setInterval(300000)
         self._heartbeat_timer.timeout.connect(self._send_heartbeat)
 
+        self._banner_timer = QTimer(self)
+        self._banner_timer.setInterval(180000)
+        self._banner_timer.timeout.connect(self._update_banners)
+
         QTimer.singleShot(120, self._update_banners)
+        QTimer.singleShot(60, self._rescale_main_screen)
 
         self._notif_timer.start()
         self._refresh_timer.start()
         self._heartbeat_timer.start()
+        self._banner_timer.start()
 
         _startup_signals.session_finished.connect(self._on_session_verify)
         _startup_signals.banners_finished.connect(self._apply_banners)
+        _startup_signals.refresh_finished.connect(self._on_refresh_finished)
+        _startup_signals.notifications_finished.connect(self._on_notifications_finished)
+        _startup_signals.login_finished.connect(self._on_login_finished)
+        _startup_signals.register_finished.connect(self._on_register_finished)
+        _startup_signals.dashboard_finished.connect(self._apply_dashboard_data)
+        _startup_signals.session_expired.connect(self._on_session_expired)
 
         self._try_restore_session()
 
@@ -392,20 +489,19 @@ class MainWindow(QMainWindow):
 
         self._update_btn = QPushButton("⬆") if self._update_ctx else None
         if self._update_btn is not None:
-            self._update_btn.setFixedSize(34, 34)
+            self._update_btn.setFixedSize(42, 42)
             self._update_btn.setToolTip("توجد نسخة أحدث من التطبيق. اضغط لتنزيلها وتثبيتها تلقائياً.\nسَيُغلق التطبيق ويعاد فتحه تلقائياً بعد التحديث.")
             self._update_btn.setStyleSheet("""
                 QPushButton {
-                    background: rgba(26, 115, 232, 230); color: white;
-                    font-size: 18px; font-weight: bold; border: none;
-                    border-radius: 17px;
+                    background: white;
+                    color: #1a73e8;
+                    font-size: 22px; font-weight: bold; border: 2px solid #1a73e8;
+                    border-radius: 21px;
                 }
-                QPushButton:hover { background: rgba(21, 87, 176, 235); }
+                QPushButton:hover { background: #e8f0fe; border: 3px solid #174ea6; }
             """)
             self._update_btn.clicked.connect(self._on_update_clicked)
             self._update_btn.hide()
-            top_row.addWidget(self._update_btn)
-            top_row.addSpacing(6)
 
         self._notif_btn = QPushButton("🔔 إشعارات")
         self._notif_btn.setFixedHeight(34)
@@ -420,6 +516,20 @@ class MainWindow(QMainWindow):
         self._notif_btn.clicked.connect(self._open_notifications_page)
         self._notif_btn.hide()
         top_row.addWidget(self._notif_btn)
+
+        self._theme_btn = QPushButton()
+        self._theme_btn.setFixedSize(36, 36)
+        self._theme_btn.setCursor(Qt.PointingHandCursor)
+        self._theme_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 230); color: #333;
+                font-size: 18px; border: none; border-radius: 18px;
+            }
+            QPushButton:hover { background: #ffffff; }
+        """)
+        self._theme_btn.clicked.connect(self._toggle_theme)
+        self._refresh_theme_btn()
+        top_row.addWidget(self._theme_btn)
 
         top_row.addStretch()
 
@@ -457,16 +567,38 @@ class MainWindow(QMainWindow):
         title = QLabel("ورشة طباعة")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("font-size: 32px; font-weight: bold; color: white; margin-bottom: 10px;")
+        self._main_title_label = title
         shadow = QGraphicsDropShadowEffect()
         shadow.setColor(QColor(0, 0, 0, 200))
         shadow.setOffset(2, 2)
         shadow.setBlurRadius(12)
         title.setGraphicsEffect(shadow)
-        layout.addWidget(title)
+
+        title_row = QHBoxLayout()
+        title_row.setAlignment(Qt.AlignCenter)
+        title_row.setSpacing(10)
+        title_row.addStretch()
+        title_row.addWidget(title)
+        if self._update_btn is not None:
+            title_row.addWidget(self._update_btn)
+        title_row.addStretch()
+        layout.addLayout(title_row)
+
+        version_label = QLabel(f"الإصدار {APP_VERSION}")
+        version_label.setAlignment(Qt.AlignCenter)
+        version_label.setStyleSheet("font-size: 12px; color: rgba(255,255,255,0.7);")
+        self._main_version_label = version_label
+        version_shadow = QGraphicsDropShadowEffect()
+        version_shadow.setColor(QColor(0, 0, 0, 160))
+        version_shadow.setOffset(1, 1)
+        version_shadow.setBlurRadius(6)
+        version_label.setGraphicsEffect(version_shadow)
+        layout.addWidget(version_label)
 
         subtitle = QLabel("اختر الخدمة للبدء")
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setStyleSheet("font-size: 16px; color: rgba(255,255,255,0.9); margin-bottom: 40px;")
+        self._main_subtitle_label = subtitle
         sub_shadow = QGraphicsDropShadowEffect()
         sub_shadow.setColor(QColor(0, 0, 0, 180))
         sub_shadow.setOffset(1, 1)
@@ -498,36 +630,32 @@ class MainWindow(QMainWindow):
         left_banner_container.addWidget(self._banner_left_label, 0, Qt.AlignCenter)
         center_row.addLayout(left_banner_container)
 
-        btn_row = QHBoxLayout()
-        btn_row.setAlignment(Qt.AlignCenter)
-        btn_row.setSpacing(40)
+        cards_grid = QGridLayout()
+        cards_grid.setAlignment(Qt.AlignCenter)
+        cards_grid.setHorizontalSpacing(40)
+        cards_grid.setVerticalSpacing(35)
+        self._main_cards_grid = cards_grid
 
-        btn_id = PlusButton("", "ترتيب وطباعة بطاقات الهوية", self.open_id_editor)
-        btn_id.setIcon(QIcon(_img_path('i2.jpeg')))
-        btn_id.setIconSize(btn_id.size())
-        _make_card("بطاقات الهوية", btn_id, btn_row)
+        cards = [
+            ("بطاقات الهوية", "ترتيب وطباعة بطاقات الهوية", 'i2.jpeg', self.open_id_editor),
+            ("صور شخصية", "قص وطباعة صور شخصية", 'i3.jpeg', self.open_photo_editor),
+            ("طباعة ملفات", "إضافة عدة ملفات PDF وطباعتها بالترتيب", 'i4.jpeg', self.open_pdf_editor),
+            ("محرر النصوص", "كتابة وتحرير النصوص", 'i8.jpeg', self.open_text_editor),
+            ("سكنر", "مسح ضوئي واستيراد صور", 'i9.jpeg', self.open_scanner),
+            ("وثائق A4", "قص وطباعة وثائق A4", 'i10.jpeg', self.open_documents_editor),
+        ]
 
-        btn_photo = PlusButton("", "قص وطباعة صور شخصية", self.open_photo_editor)
-        btn_photo.setIcon(QIcon(_img_path('i3.jpeg')))
-        btn_photo.setIconSize(btn_photo.size())
-        _make_card("صور شخصية", btn_photo, btn_row)
+        cols = 3
+        self._main_card_buttons = []
+        self._main_card_labels = []
+        for idx, (label, hint, icon_file, slot) in enumerate(cards):
+            btn = PlusButton("", hint, slot)
+            btn.set_cover_image(_img_path(icon_file))
+            self._main_card_buttons.append(btn)
+            self._main_card_labels.append(
+                _make_card(label, btn, cards_grid, idx, cols))
 
-        btn_future2 = PlusButton("", "تحرير ملفات PDF", self.open_pdf_editor)
-        btn_future2.setIcon(QIcon(_img_path('i4.jpeg')))
-        btn_future2.setIconSize(btn_future2.size())
-        _make_card("تحرير PDF", btn_future2, btn_row)
-
-        btn_text = PlusButton("", "كتابة وتحرير النصوص", self.open_text_editor)
-        btn_text.setIcon(QIcon(_img_path('i8.jpeg')))
-        btn_text.setIconSize(btn_text.size())
-        _make_card("محرر النصوص", btn_text, btn_row)
-
-        btn_scanner = PlusButton("", "مسح ضوئي واستيراد صور", self.open_scanner)
-        btn_scanner.setIcon(QIcon(_img_path('i9.jpeg')))
-        btn_scanner.setIconSize(btn_scanner.size())
-        _make_card("سكنر", btn_scanner, btn_row)
-
-        center_row.addLayout(btn_row)
+        center_row.addLayout(cards_grid)
 
         right_banner_container = QVBoxLayout()
         right_banner_container.setAlignment(Qt.AlignCenter)
@@ -621,7 +749,7 @@ class MainWindow(QMainWindow):
                 border-radius: 14px;
             }
         """)
-        img_dir = os.path.join(sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.dirname(os.path.dirname(__file__)), 'img')
+        img_dir = _img_dir()
         box_layout = QVBoxLayout(box)
         box_layout.setContentsMargins(20, 16, 20, 16)
         box_layout.setSpacing(10)
@@ -679,6 +807,24 @@ class MainWindow(QMainWindow):
 
         return widget, welcome_label, profile_label, btn_login, btn_register
 
+    def _toggle_theme(self):
+        new = theme.LIGHT if theme.is_dark() else theme.DARK
+        theme.save_mode(new)
+        app = QApplication.instance()
+        if app is not None:
+            theme.apply(app, new)
+        self._refresh_theme_btn()
+
+    def _refresh_theme_btn(self):
+        if getattr(self, "_theme_btn", None) is None:
+            return
+        if theme.is_dark():
+            self._theme_btn.setText("☀️")
+            self._theme_btn.setToolTip("التبديل إلى الوضع النهاري")
+        else:
+            self._theme_btn.setText("🌙")
+            self._theme_btn.setToolTip("التبديل إلى الوضع الليلي")
+
     def _show_update_bar(self, message, red=True):
         """Show the wide bottom bar with a message (default red)."""
         if self._update_bar is None:
@@ -697,19 +843,92 @@ class MainWindow(QMainWindow):
         if self._update_bar is not None:
             self._update_bar.hide()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if getattr(self, "_main_card_buttons", None):
+            self._rescale_main_screen()
+
+    def _rescale_main_screen(self):
+        """تصغير/تكبير أيقونات الأقسام والشعارات الجانبية بما يناسب نافذة
+        التطبيق حتى لا تتراكب العناصر عند تصغير الشاشة. عند الشاشة الكبيرة
+        تبقى الأيقونات بحجمها الطبيعي (نسبة 1.0)."""
+        buttons = getattr(self, "_main_card_buttons", None)
+        if not buttons:
+            return
+        avail_w = max(160, self._main_widget.width() - 60)
+        avail_h = max(160, self._main_widget.height() - 30)
+
+        grid_full_w = 3 * 120 + 2 * 40   # عرض الشبكة عند النسبة 1.0
+        grid_full_h = 2 * 120 + 35       # ارتفاع الشبكة عند النسبة 1.0
+        mid_gap = 40                     # فراغ center_row بين الشعارات والشبكة
+        banner_w, banner_h = self._banner_w, self._banner_h
+        vfixed = 365                     # ارتفاع العناصر الثابتة حول الشبكة تقريباً
+
+        # إن كانت الشاشة ضيقة جداً تُخفى الشعارات الجانبية ليتسع مكان الأيقونات
+        show_banners = (avail_w - mid_gap - 2 * banner_w) / grid_full_w >= 0.5
+        widths = avail_w - mid_gap - (2 * banner_w if show_banners else 0)
+        s_w = widths / grid_full_w
+        s_h = (avail_h - vfixed) / grid_full_h
+        s = max(0.35, min(s_w, s_h, 1.0))
+
+        if show_banners != self._banners_visible:
+            self._banners_visible = show_banners
+            for lbl in (self._banner_left_label, self._banner_right_label,
+                        self._banner_left_link, self._banner_right_link):
+                lbl.setVisible(show_banners)
+
+        self._banner_left_label.setFixedSize(int(banner_w * s), int(banner_h * s))
+        self._banner_right_label.setFixedSize(int(banner_w * s), int(banner_h * s))
+        self._refresh_banner_pixmaps()
+
+        self._main_cards_grid.setHorizontalSpacing(max(6, int(40 * s)))
+        self._main_cards_grid.setVerticalSpacing(max(6, int(35 * s)))
+        for btn in self._main_card_buttons:
+            btn.set_card_size(120 * s)
+        for lbl in self._main_card_labels:
+            lbl.setStyleSheet(f"font-size: {max(9, int(12 * s))}px; color: #555;")
+        if hasattr(self, "_main_title_label") and self._main_title_label is not None:
+            self._main_title_label.setStyleSheet(
+                f"font-size: {max(16, int(32 * s))}px; font-weight: bold; color: white; margin-bottom: 10px;")
+        if hasattr(self, "_main_subtitle_label") and self._main_subtitle_label is not None:
+            self._main_subtitle_label.setStyleSheet(
+                f"font-size: {max(12, int(16 * s))}px; color: rgba(255,255,255,0.9); margin-bottom: 40px;")
+        if hasattr(self, "_main_version_label") and self._main_version_label is not None:
+            self._main_version_label.setStyleSheet(
+                f"font-size: {max(9, int(12 * s))}px; color: rgba(255,255,255,0.7);")
+
     # ── Self-update handling ─────────────────────────────────────────────
     def _check_for_update_bg(self):
         """Background check via core/updater; toggles the update button."""
         if self._update_ctx is None or self._update_btn is None:
             return
         try:
-            from core import updater
-            info = updater.check_for_update(
-                self._update_ctx.get("version"),
-                repo=self._update_ctx.get("repo"),
-            )
+            from PySide6.QtCore import QThread
         except Exception:
-            info = None
+            return
+        thr = QThread(self)
+        ctx = dict(self._update_ctx)
+
+        def work():
+            try:
+                from core import updater
+                info = updater.check_for_update(
+                    ctx.get("version"),
+                    repo=ctx.get("repo"),
+                )
+            except Exception:
+                info = None
+            self._update_info = info if info else None
+            self._update_thread_result = info
+
+        thr.run = work
+        thr.finished.connect(thr.deleteLater)
+        thr.finished.connect(self._apply_update_thread_result)
+        self._update_thread = thr
+        thr.start()
+
+    def _apply_update_thread_result(self):
+        info = getattr(self, "_update_thread_result", None)
         self._update_info = info if info else None
         if info:
             self._update_btn.show()
@@ -821,9 +1040,8 @@ class MainWindow(QMainWindow):
     def _update_notice_path(self):
         # Store the notice next to the real data folder, which survives a
         # relaunch (next to the exe when frozen, next to the source tree in dev).
-        base = (os.path.dirname(sys.executable) if getattr(sys, 'frozen', False)
-                else os.path.dirname(os.path.dirname(__file__)))
-        return os.path.join(base, 'data', 'update_notice.txt')
+        from core.runtime import data_dir
+        return os.path.join(data_dir(), 'update_notice.txt')
 
     def _write_update_notice(self, message):
         p = self._update_notice_path()
@@ -1104,6 +1322,7 @@ class MainWindow(QMainWindow):
         self._update_auth_ui()
         self._switch_to_main()
         logger.info("استعادة جلسة سابقة (فورية): %s", username)
+        self._sub_pending = True
         QTimer.singleShot(0, self._verify_session_bg)
         return True
 
@@ -1123,9 +1342,11 @@ class MainWindow(QMainWindow):
     def _on_session_verify(self, qdata, qerr):
         if qerr:
             logger.warning("استعادة جلسة سابقة (التحقق فشل): %s — %s", self._username, qerr)
+            self._sub_pending = False
             QTimer.singleShot(3000, self._load_notifications)
             return
         if not qdata:
+            self._sub_pending = False
             QTimer.singleShot(500, self._load_notifications)
             return
         self._api_data = qdata
@@ -1145,6 +1366,10 @@ class MainWindow(QMainWindow):
                 api_clear_pending()
         QTimer.singleShot(500, self._load_notifications)
         logger.info("اكتمل التحقق من الجلسة: %s", self._username)
+        self._sub_pending = False
+
+    def _on_session_expired_from_anywhere(self):
+        _startup_signals.session_expired.emit()
 
     def _on_session_expired(self):
         self._clear_session()
@@ -1238,30 +1463,43 @@ class MainWindow(QMainWindow):
         if not self._logged_in:
             return
         if self._use_api:
-            from core.database import api_check_auth
-            qdata, qerr = api_check_auth()
-            if qerr:
-                logger.warning("Refresh check_auth failed: %s", qerr)
+            if self._refresh_running:
                 return
-            if qdata:
-                old_sub = self._subscription_required
-                old_admin = self._is_admin
-                self._api_data = qdata
-                self._display_name = qdata.get("shop_name", self._username)
-                self._is_admin = qdata.get("is_admin", False)
-                self._subscription_required = bool(qdata.get("subscription_required", True))
-                if self._subscription_required != old_sub or self._is_admin != old_admin:
-                    self._update_auth_ui()
-                    self._update_banners()
-                    logger.info("تم تحديث تلقائي للبيانات: %s", self._username)
-            if self._is_admin and self._stack.currentWidget() is self._dashboard_widget:
-                self._refresh_dashboard()
+            self._refresh_running = True
+            import threading
+            t = threading.Thread(target=self._auto_refresh_worker, daemon=True, name="auto-refresh")
+            t.start()
         else:
             from core.database import load_users
             self._users = load_users()
             if self._is_admin and self._stack.currentWidget() is self._dashboard_widget:
                 self._refresh_dashboard()
             logger.info("تم تحديث تلقائي للبيانات المحلية")
+
+    def _auto_refresh_worker(self):
+        try:
+            from core.database import api_check_auth
+            qdata, qerr = api_check_auth()
+        except Exception as e:
+            qdata, qerr = None, str(e)
+        _startup_signals.refresh_finished.emit(qdata, qerr)
+
+    def _on_refresh_finished(self, qdata, qerr):
+        self._refresh_running = False
+        if qerr or not qdata:
+            return
+        old_sub = self._subscription_required
+        old_admin = self._is_admin
+        self._api_data = qdata
+        self._display_name = qdata.get("shop_name", self._username)
+        self._is_admin = qdata.get("is_admin", False)
+        self._subscription_required = bool(qdata.get("subscription_required", True))
+        if self._subscription_required != old_sub or self._is_admin != old_admin:
+            self._update_auth_ui()
+            self._update_banners()
+            logger.info("تم تحديث تلقائي للبيانات: %s", self._username)
+        if self._is_admin and self._stack.currentWidget() is self._dashboard_widget:
+            self._refresh_dashboard()
 
     def _login_submit(self, eng_user, password):
         username = eng_user.text().strip()
@@ -1273,43 +1511,16 @@ class MainWindow(QMainWindow):
         self._login_spinner.show()
         QApplication.processEvents()
         if self._use_api:
-            from core.database import api_login, api_login_force_check, api_check_auth, api_clear_pending
-            data, err, need_force = api_login_force_check(username, pw)
-            if need_force:
-                ret = QMessageBox.question(self, "تسجيل الدخول قسرياً",
-                    "هذا الحساب مسجل على جهاز آخر\nهل تريد تسجيل الدخول قسرياً وطرد الجلسات القديمة؟",
-                    QMessageBox.Yes | QMessageBox.No)
-                if ret == QMessageBox.Yes:
-                    data, err = api_login(username, pw, force_login=True)
-                else:
-                    self._login_spinner.hide()
-                    return
-            if err:
-                self._login_spinner.hide()
-                QMessageBox.warning(self, "خطأ", err)
+            if self._login_busy:
                 return
-            self._logged_in = True
-            self._username = data["username"]
-            self._display_name = data.get("shop_name", username)
-            self._is_admin = data.get("is_admin", False)
-            self._api_data = data
-            qdata, qerr = api_check_auth()
-            if qdata:
-                self._api_data = qdata
-                self._subscription_required = bool(qdata.get("subscription_required", True))
-            self._update_auth_ui()
-            self._switch_to_main()
-            self._update_banners()
-            if not self._is_admin and qdata:
-                pend = qdata.get("pending_messages", [])
-                if pend:
-                    rem = qdata.get("remaining_days", 0)
-                    QMessageBox.information(self, "تم التجديد",
-                        f"تم زيادة عدد أيام اشتراكك وأصبحت {rem} يوم")
-                    api_clear_pending()
-            self._save_session()
-            QTimer.singleShot(500, self._load_notifications)
-            logger.info("تسجيل دخول API: %s", username)
+            self._login_busy = True
+            self._login_stage = 0
+            self._login_pending_username = username
+            self._login_pending_password = pw
+            import threading
+            t = threading.Thread(target=self._login_worker, args=(username, pw,),
+                                 daemon=True, name="login")
+            t.start()
             return
         if username not in self._users:
             self._login_spinner.hide()
@@ -1332,6 +1543,97 @@ class MainWindow(QMainWindow):
         self._load_notifications()
         self._save_session()
         logger.info("تسجيل دخول ناجح: %s", username)
+
+    def _login_worker(self, username, pw):
+        try:
+            from core.database import api_login_force_check
+            data, err, need_force = api_login_force_check(username, pw)
+        except Exception as e:
+            data, err, need_force = None, str(e), False
+        _startup_signals.login_finished.emit(data, err, need_force)
+
+    def _login_force_worker(self, username, pw):
+        try:
+            from core.database import api_login
+            data, err = api_login(username, pw, force_login=True)
+        except Exception as e:
+            data, err = None, str(e)
+        _startup_signals.login_finished.emit(data, err, False)
+
+    def _login_check_worker(self, username):
+        try:
+            from core.database import api_check_auth
+            qdata, qerr = api_check_auth()
+        except Exception as e:
+            qdata, qerr = None, str(e)
+        _startup_signals.login_finished.emit(qdata, qerr, False)
+
+    def _on_login_finished(self, data, err, need_force):
+        if need_force:
+            username = self._login_pending_username
+            pw = self._login_pending_password
+            ret = QMessageBox.question(self, "تسجيل الدخول قسرياً",
+                "هذا الحساب مسجل على جهاز آخر\nهل تريد تسجيل الدخول قسرياً وطرد الجلسات القديمة؟",
+                QMessageBox.Yes | QMessageBox.No)
+            if ret == QMessageBox.Yes:
+                self._login_spinner.show()
+                QApplication.processEvents()
+                import threading
+                t = threading.Thread(target=self._login_force_worker, args=(username, pw,),
+                                     daemon=True, name="login-force")
+                t.start()
+                return
+            self._login_busy = False
+            self._login_stage = 0
+            self._sub_pending = False
+            self._login_spinner.hide()
+            return
+        if self._login_stage == 0 and not data:
+            self._login_busy = False
+            self._login_stage = 0
+            self._sub_pending = False
+            self._login_spinner.hide()
+            if err:
+                QMessageBox.warning(self, "خطأ", err)
+            return
+        if self._login_stage == 0:
+            self._logged_in = True
+            self._username = data["username"]
+            self._display_name = data.get("shop_name", self._username)
+            self._is_admin = data.get("is_admin", False)
+            self._api_data = data
+            self._subscription_required = bool(data.get("subscription_required", True))
+            self._update_auth_ui()
+            self._switch_to_main()
+            self._login_stage = 1
+            self._sub_pending = True
+            self._login_spinner.hide()
+            import threading
+            t = threading.Thread(target=self._login_check_worker,
+                                 args=(self._username,), daemon=True, name="login-check")
+            t.start()
+            return
+        if data:
+            self._api_data = data
+            self._subscription_required = bool(data.get("subscription_required", True))
+        self._update_banners()
+        if not self._is_admin and data:
+            pend = data.get("pending_messages", [])
+            if pend:
+                rem = data.get("remaining_days", 0)
+                QMessageBox.information(self, "تم التجديد",
+                    f"تم زيادة عدد أيام اشتراكك وأصبحت {rem} يوم")
+                try:
+                    from core.database import api_clear_pending
+                    api_clear_pending()
+                except Exception:
+                    pass
+        self._save_session()
+        QTimer.singleShot(0, self._load_notifications)
+        self._login_busy = False
+        self._login_stage = 0
+        self._sub_pending = False
+        logger.info("تسجيل دخول API: %s", self._username)
 
     def _register_submit(self, fields):
         data = {k: fields[k].text().strip() for k in fields}
@@ -1362,28 +1664,16 @@ class MainWindow(QMainWindow):
         self._register_spinner.show()
         QApplication.processEvents()
         if self._use_api:
-            from core.database import api_register
-            rdata, err = api_register(data["english_name"], data["password"],
-                                       data["shop_name"], phone)
-            if err:
-                self._register_spinner.hide()
-                QMessageBox.warning(self, "خطأ", err)
+            if self._register_busy:
                 return
-            for line in fields.values():
-                line.clear()
-            self._logged_in = True
-            self._username = rdata["username"]
-            self._display_name = data["shop_name"]
-            self._is_admin = False
-            from core.database import api_check_auth
-            qdata, _ = api_check_auth()
-            if qdata:
-                self._api_data = qdata
-                self._subscription_required = bool(qdata.get("subscription_required", True))
-            self._update_auth_ui()
-            self._switch_to_main()
-            self._save_session()
-            logger.info("تم تسجيل مستخدم API: %s", rdata["username"])
+            self._register_busy = True
+            self._register_display_name = data["shop_name"]
+            self._register_fields = fields
+            import threading
+            t = threading.Thread(target=self._register_worker,
+                                 args=(data["english_name"], data["password"], data["shop_name"], phone,),
+                                 daemon=True, name="register")
+            t.start()
             return
         if data["english_name"] in self._users:
             self._register_spinner.hide()
@@ -1425,6 +1715,47 @@ class MainWindow(QMainWindow):
             line.clear()
         callback()
 
+    def _register_worker(self, username, pw, shop_name, phone):
+        qdata = None
+        try:
+            from core.database import api_register, api_check_auth
+            rdata, rerr = api_register(username, pw, shop_name, phone)
+            if not rerr:
+                qdata, _ = api_check_auth()
+        except Exception as e:
+            rdata, rerr = None, str(e)
+        _startup_signals.register_finished.emit(rdata, qdata, rerr)
+
+    def _on_register_finished(self, rdata, qdata, err):
+        self._register_busy = False
+        self._register_spinner.hide()
+        if err or not rdata:
+            QMessageBox.warning(self, "خطأ", err or "فشل التسجيل")
+            return
+        fields = self._register_fields
+        if fields:
+            for line in fields.values():
+                line.clear()
+        self._logged_in = True
+        self._username = rdata["username"]
+        self._display_name = self._register_display_name or self._username
+        self._is_admin = False
+        if qdata:
+            self._api_data = qdata
+            self._subscription_required = bool(qdata.get("subscription_required", True))
+        self._update_auth_ui()
+        self._switch_to_main()
+        self._save_session()
+        # نفس سلوك تسجيل الدخول/استعادة الجلسة: أثناء اكتمال فحص الاشتراك تبقى
+        # الأقسام متاحة، وبانتهاء التحقق تُطبق حالة الاشتراك الفعلية.
+        self._sub_pending = True
+        QTimer.singleShot(0, self._verify_session_bg)
+        QTimer.singleShot(0, self._load_notifications)
+        if rdata.get("trial_days", 0) > 0:
+            QTimer.singleShot(150, lambda: QMessageBox.information(
+                self, "تم التفعيل", "تم تفعيل حسابك لمدة 3 ايام لتجربة التطبيق"))
+        logger.info("تم تسجيل مستخدم API: %s", rdata["username"])
+
     def _set_profile_image(self, size=48):
         if self._use_api:
             if self._api_data and self._api_data.get("profile_pixmap"):
@@ -1457,6 +1788,8 @@ class MainWindow(QMainWindow):
 
     def _update_banners(self):
         if self._use_api:
+            if not self._logged_in:
+                return
             import threading
             t = threading.Thread(target=self._banners_worker, daemon=True, name="banners")
             t.start()
@@ -1472,9 +1805,28 @@ class MainWindow(QMainWindow):
             banners, err = None, str(e)
         _startup_signals.banners_finished.emit(banners, err)
 
+    def _refresh_banner_pixmaps(self):
+        """إعادة ضبط صور البانرات على مساحة الإطار الحالية بعد أي تغيير لحجمها،
+        حتى لا تقتّص الصورة أو يختفي نص مكتوب عليها عند تصغير التطبيق."""
+        saved = getattr(self, "_banner_orig_pix", {})
+        if not saved:
+            return
+        for side, label in [
+            ("left", self._banner_left_label),
+            ("right", self._banner_right_label),
+        ]:
+            pix = saved.get(side)
+            if pix is None or pix.isNull() or not label.isVisible():
+                continue
+            w, h = label.width(), label.height()
+            if w > 10 and h > 10:
+                label.setPixmap(pix.scaled(w - 10, h - 10,
+                                           Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
     def _apply_banners(self, banners, err):
         if err or not banners:
             return
+        self._banner_orig_pix = {}
         for side, label, link_label in [
             ("left", self._banner_left_label, self._banner_left_link),
             ("right", self._banner_right_label, self._banner_right_link),
@@ -1493,8 +1845,12 @@ class MainWindow(QMainWindow):
             if pix_data:
                 pix = QPixmap()
                 if pix.loadFromData(pix_data):
-                    label.setPixmap(pix.scaled(self._banner_w - 10, self._banner_h - 10, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    self._banner_orig_pix[side] = pix
+                else:
+                    self._banner_orig_pix[side] = None
+                    label.clear()
             else:
+                self._banner_orig_pix[side] = None
                 label.clear()
             if link_url:
                 link_label.setText(f'<a href="{link_url}" style="color: white; text-decoration: none;">{link_url}</a>')
@@ -1502,6 +1858,7 @@ class MainWindow(QMainWindow):
             else:
                 link_label.clear()
                 link_label.hide()
+        self._refresh_banner_pixmaps()
 
     def _switch_to_main(self):
         self._stack.setCurrentIndex(0)
@@ -1601,6 +1958,8 @@ class MainWindow(QMainWindow):
     def _require_subscription(self):
         if self._is_admin:
             return True
+        if self._sub_pending:
+            return True
         if not self._subscription_required:
             return True
         if self._use_api:
@@ -1619,6 +1978,8 @@ class MainWindow(QMainWindow):
 
     def _check_section_access(self):
         if self._is_admin:
+            return True
+        if self._sub_pending:
             return True
         if not self._subscription_required:
             return True
@@ -1640,6 +2001,8 @@ class MainWindow(QMainWindow):
 
     def _show_subscription_warning(self):
         if self._is_admin:
+            return
+        if self._sub_pending:
             return
         if not self._subscription_required:
             return
@@ -1687,6 +2050,22 @@ class MainWindow(QMainWindow):
             logger.info("تجربة قسم %s للمستخدم %s: %d متبقية", section, self._username, remaining - 1)
         return True
 
+    def _ensure_editor(self, slot, factory):
+        """إنشاء المحرر عند أول فتح للقسم فقط (تحميل كسول) ووضعه في فتحته
+        الثابتة داخل الحزمة، مع ربط التحقق من الاشتراك وزر الرجوع."""
+        editor = self._lazy_editors.get(slot)
+        if editor is None:
+            editor = factory()
+            editor.subscription_check = lambda: self._require_subscription()
+            editor.go_back.connect(self._switch_to_main)
+            old = self._stack.widget(slot)
+            self._stack.removeWidget(old)
+            self._stack.insertWidget(slot, editor)
+            if old is not None:
+                old.deleteLater()
+            self._lazy_editors[slot] = editor
+        return editor
+
     def open_id_editor(self):
         self._require_auth(lambda: self._check_section_access() and self._check_trial("id") and self._open_id_editor())
 
@@ -1694,29 +2073,42 @@ class MainWindow(QMainWindow):
         self._require_auth(lambda: self._check_section_access() and self._check_trial("photo") and self._open_photo_editor())
 
     def open_pdf_editor(self):
-        QMessageBox.information(self, "تنبيه", "قسم تحرير PDF قيد الصيانة حاليًا. سيتم تفعيله قريبًا.")
-        logger.info("محاولة فتح PDF editor - معطل للصيانة")
+        self._require_auth(lambda: self._check_section_access() and self._check_trial("pdf") and self._open_pdf_editor())
+
+    def open_documents_editor(self):
+        self._require_auth(lambda: self._check_section_access() and self._check_trial("documents") and self._open_documents_editor())
+
+    def _open_documents_editor(self):
+        self._ensure_editor(4, DocumentsEditor)
+        self._stack.setCurrentIndex(4)
+        self.setWindowTitle("ورشة طباعة - وثائق A4")
+        logger.info("فتح محرر وثائق A4")
 
     def _open_id_editor(self):
+        self._ensure_editor(1, A4Editor)
         self._stack.setCurrentIndex(1)
         self.setWindowTitle("ورشة طباعة - بطاقات الهوية")
         logger.info("فتح محرر بطاقات الهوية")
 
     def _open_photo_editor(self):
+        self._ensure_editor(2, PhotoEditor)
         self._stack.setCurrentIndex(2)
         self.setWindowTitle("ورشة طباعة - الصور الشخصية")
         logger.info("فتح محرر الصور الشخصية")
 
     def _open_pdf_editor(self):
+        self._ensure_editor(3, PrintFilesEditor)
         self._stack.setCurrentIndex(3)
-        self.setWindowTitle("ورشة طباعة - تحرير PDF")
-        logger.info("فتح محرر PDF")
+        self.setWindowTitle("ورشة طباعة - طباعة ملفات")
+        logger.info("فتح قسم طباعة الملفات")
 
     def open_text_editor(self):
-        self._require_auth(lambda: self._check_section_access() and self._check_trial("text") and self._open_text_editor())
+        QMessageBox.information(self, "تحت الصيانة", "قسم محرر النصوص تحت الصيانة، سيكون جاهزاً في أقرب وقت ممكن.")
 
     def _open_text_editor(self):
-        QMessageBox.information(self, "تحت الصيانة", "محرر النصوص حالياً تحت الصيانة.\nسيتم تشغيله قريباً.")
+        self._ensure_editor(5, TextEditor)
+        self._stack.setCurrentWidget(self._lazy_editors[5])
+        self.setWindowTitle("ورشة طباعة - محرر النصوص")
 
     def open_file_arg(self, path):
         self._pending_file = path
@@ -1726,7 +2118,8 @@ class MainWindow(QMainWindow):
         self._require_auth(lambda: self._check_section_access() and self._open_scanner())
 
     def _open_scanner(self):
-        self._stack.setCurrentWidget(self._scanner_page)
+        self._ensure_editor(6, ScannerPage)
+        self._stack.setCurrentWidget(self._lazy_editors[6])
         self.setWindowTitle("ورشة طباعة - ماسح ضوئي")
         logger.info("فتح السكنر")
 
@@ -1928,20 +2321,45 @@ class MainWindow(QMainWindow):
     def _load_notifications(self):
         if not self._logged_in:
             return
-        if self._use_api:
-            from core.database import api_get_notifications
-            data, err = api_get_notifications()
-            if err or data is None:
-                return
-            self._notif_list = data.get("notifications", [])
-            self._notif_unread = data.get("unread_count", 0)
-        else:
+        if not self._use_api:
             from core.database import get_notifications_for_user, get_unread_notifications_count
             self._notif_list = get_notifications_for_user(self._username)
             self._notif_unread = get_unread_notifications_count(self._username)
+            self._update_notif_badge()
+            if not self._is_admin:
+                self._enqueue_new_notifications()
+            return
+        if self._notif_fetching:
+            self._notif_fetch_pending = True
+            return
+        self._notif_fetching = True
+        import threading
+        t = threading.Thread(target=self._notifications_worker, daemon=True, name="notifications")
+        t.start()
+
+    def _notifications_worker(self):
+        try:
+            from core.database import api_get_notifications
+            data, err = api_get_notifications()
+        except Exception as e:
+            data, err = None, str(e)
+        _startup_signals.notifications_finished.emit(data, err)
+
+    def _on_notifications_finished(self, data, err):
+        self._notif_fetching = False
+        if err or data is None:
+            if self._notif_fetch_pending:
+                self._notif_fetch_pending = False
+                self._load_notifications()
+            return
+        self._notif_list = data.get("notifications", [])
+        self._notif_unread = data.get("unread_count", 0)
         self._update_notif_badge()
         if not self._is_admin:
             self._enqueue_new_notifications()
+        if self._notif_fetch_pending:
+            self._notif_fetch_pending = False
+            self._load_notifications()
 
     def _enqueue_new_notifications(self):
         new = [n for n in self._notif_list
@@ -1999,6 +2417,8 @@ class MainWindow(QMainWindow):
         self._mark_notif_read(nid)
 
         dialog = QDialog(self)
+        dialog.setObjectName("notifDialog")
+        dialog.setStyleSheet("#notifDialog { background: #ffffff; }")
         dialog.setWindowTitle("اشعار جديد")
         dialog.setMinimumWidth(440)
         layout = QVBoxLayout(dialog)
@@ -2961,14 +3381,10 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _refresh_dashboard(self, search_text="", filter_date=None):
-        self._dash_online_table.setRowCount(0)
-        if self._use_api:
-            from core.database import api_get_admin_all_users
-            users_data, err = api_get_admin_all_users()
-            if err:
-                users_data = []
-            users = users_data or []
-        else:
+        if self._dash_fetching:
+            self._dash_pending = True
+            return
+        if not self._use_api:
             users = []
             for uname, udata in self._users.items():
                 if uname == "ahmed":
@@ -2985,30 +3401,57 @@ class MainWindow(QMainWindow):
                     "remaining_days": remaining,
                     "status": "active" if remaining > 0 else "inactive",
                 })
+            self._apply_dashboard_data(users, None)
+            return
+        self._dash_fetching = True
+        import threading
+        t = threading.Thread(target=self._dashboard_worker, daemon=True, name="dashboard")
+        t.start()
 
-        today = date.today().isoformat()
-        today_active = sum(1 for u in users if u.get("used_today") or u.get("is_connected"))
+    def _dashboard_worker(self):
+        try:
+            from core.database import api_get_admin_all_users
+            users_data, err = api_get_admin_all_users()
+        except Exception as e:
+            users_data, err = None, str(e)
+        _startup_signals.dashboard_finished.emit(users_data, err)
+
+    def _apply_dashboard_data(self, users, err):
+        self._dash_fetching = False
+        users = users or []
+        self._dash_online_table.setRowCount(0)
+
+        # الاستعمال اليومي يأتي من سجلّ usage_daily في الخادم (لا من last_seen)،
+        # فيبقى محفوظاً لمن استعمل التطبيق صباحاً ثم أغلق البرنامج.
+        today_active = sum(1 for u in users if u.get("used_today"))
         inactive_30d = sum(1 for u in users if u.get("status") == "inactive")
-        not_logged_today = sum(1 for u in users if not u.get("used_today") and not u.get("is_connected"))
+        not_logged_today = len(users) - today_active
 
         self._update_stat_card(self._dash_stat_total, len(users))
         self._update_stat_card(self._dash_stat_today, today_active)
         self._update_stat_card(self._dash_stat_inactive, inactive_30d)
         self._update_stat_card(self._dash_stat_notlogged, not_logged_today)
 
-        connected_users = [u for u in users if u.get("is_connected")]
-        self._dash_online_label.setText(f"المتصلون اليوم ({len(connected_users)})")
+        active_users = [u for u in users if u.get("used_today")]
+        self._dash_online_label.setText(f"استعملوا اليوم ({len(active_users)})")
+        connected_users = [u for u in active_users if u.get("is_connected")]
 
-        for i, u in enumerate(connected_users):
+        for i, u in enumerate(active_users):
             self._dash_online_table.insertRow(i)
             self._dash_online_table.setItem(i, 0, QTableWidgetItem(u.get("username", "")))
             self._dash_online_table.setItem(i, 1, QTableWidgetItem(u.get("shop_name", "")))
-            last_seen = u.get("last_seen", "")
-            if len(last_seen) >= 16:
-                last_seen = last_seen[:16].replace("T", " ")
-            self._dash_online_table.setItem(i, 2, QTableWidgetItem(last_seen if last_seen else "—"))
+            when = u.get("used_today_at") or u.get("last_seen", "")
+            if len(when) >= 16:
+                when = when[11:16]
+            self._dash_online_table.setItem(i, 2, QTableWidgetItem(
+                when + ("  ●" if u.get("is_connected") else "") if when else "—"))
             self._dash_online_table.setItem(i, 3, QTableWidgetItem(u.get("phone", "")))
-        logger.info("تحديث لوحة التحكم: %d مستخدم، %d متصل", len(users), len(connected_users))
+        logger.info("لوحة التحكم: %d مستخدم، استعمل اليوم %d، متصل الآن %d",
+                    len(users), len(active_users), len(connected_users))
+
+        if self._dash_pending:
+            self._dash_pending = False
+            self._refresh_dashboard()
 
     def _open_dashboard(self):
         self._prev_page_index = self._stack.currentIndex()
@@ -3021,7 +3464,7 @@ class MainWindow(QMainWindow):
         target = self._prev_page_index
         self._stack.setCurrentIndex(target)
         titles = {0: "ورشة طباعة", 1: "ورشة طباعة - بطاقات الهوية",
-                  2: "ورشة طباعة - الصور الشخصية", 3: "ورشة طباعة - تحرير PDF",
+                  2: "ورشة طباعة - الصور الشخصية", 3: "ورشة طباعة - طباعة ملفات",
                   4: "ورشة طباعة - تسجيل دخول", 5: "ورشة طباعة - تسجيل جديد",
                   7: "ورشة طباعة - الملف الشخصي"}
         self.setWindowTitle(titles.get(target, "ورشة طباعة"))
@@ -3856,4 +4299,4 @@ class MainWindow(QMainWindow):
         logger.info("سحب %d صورة إلى الشاشة الرئيسية", len(paths))
         self._open_id_editor()
         for path in paths:
-            self._editor.add_image(path)
+            self._ensure_editor(1, A4Editor).add_image(path)

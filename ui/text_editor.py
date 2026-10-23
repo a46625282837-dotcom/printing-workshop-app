@@ -8,15 +8,17 @@ from PySide6.QtWidgets import (
     QTabWidget, QScrollArea, QFrame, QSplitter, QSizePolicy,
     QDialogButtonBox, QSlider, QGroupBox, QGridLayout, QInputDialog,
     QGraphicsDropShadowEffect, QGraphicsView, QGraphicsScene,
-    QGraphicsRectItem, QGraphicsProxyWidget,
+    QGraphicsRectItem, QGraphicsProxyWidget, QGraphicsPixmapItem,
+    QGraphicsObject,
+    QToolButton, QMenu,
 )
 from PySide6.QtGui import (
     QAction, QFont, QColor, QTextCharFormat, QTextBlockFormat,
     QTextCursor, QIcon, QPageSize, QImage,
     QPainter, QPixmap, QTextDocument, QShortcut, QKeySequence,
-    QTextOption, QAbstractTextDocumentLayout, QPageLayout,
+    QPen, QPainterPath, QBrush, QPolygonF,
 )
-from PySide6.QtCore import Qt, Signal, QSize, QMargins, QMarginsF, QRectF, QEvent, QTimer, QSizeF, QPointF
+from PySide6.QtCore import Qt, Signal, QSize, QMargins, QMarginsF, QRectF, QEvent, QTimer, QSizeF, QPointF, QRect, QPoint
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtPrintSupport import QPrinter
 from core.printer import get_selected_printer_name, set_printer_name, set_last_paper_type
@@ -25,6 +27,9 @@ logger = logging.getLogger(__name__)
 
 
 class _ZoomableTextEdit(QTextEdit):
+    from PySide6.QtWidgets import QRubberBand
+    shape_drawn = Signal(str, object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._zoom_level = 0
@@ -43,6 +48,61 @@ class _ZoomableTextEdit(QTextEdit):
         self._pipe.hide()
         self.textChanged.connect(self._update_pipe)
         self.cursorPositionChanged.connect(self._update_pipe)
+
+        # حالة الرسم بالسحب للأشكال
+        self.shape_pending = False
+        self.pending_shape_name = None
+        self._draw_start = None
+        self._draw_current = None
+        self._rubber = self.QRubberBand(self.QRubberBand.Rectangle, self.viewport())
+
+    def set_shape_draw_mode(self, name):
+        self.pending_shape_name = name
+        self.shape_pending = bool(name)
+        self.viewport().setCursor(Qt.CrossCursor if self.shape_pending else Qt.IBeamCursor)
+        if not self.shape_pending:
+            self._rubber.hide()
+
+    def mousePressEvent(self, event):
+        if self.shape_pending and event.button() == Qt.LeftButton:
+            self._draw_start = event.position().toPoint()
+            self._draw_current = self._draw_start
+            self._rubber.setGeometry(QRect(self._draw_start, self._draw_start).normalized())
+            self._rubber.show()
+            event.accept()
+            return
+        if event.button() == Qt.LeftButton:
+            test_cursor = self.cursorForPosition(event.position().toPoint())
+            block = test_cursor.block()
+            text_at_pos = block.text()[:test_cursor.positionInBlock()]
+            if text_at_pos.strip() == "":
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.shape_pending and self._draw_start is not None:
+            self._draw_current = event.position().toPoint()
+            rect = QRect(self._draw_start, self._draw_current).normalized()
+            self._rubber.setGeometry(rect)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self.shape_pending and self._draw_start is not None:
+            end = event.position().toPoint()
+            rect = QRect(self._draw_start, end).normalized()
+            self._rubber.hide()
+            shape = self.pending_shape_name
+            self._draw_start = None
+            self._draw_current = None
+            self.set_shape_draw_mode(None)
+            if rect.width() > 4 and rect.height() > 4:
+                self.shape_drawn.emit(shape, rect)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, event):
         cw = self.cursorWidth()
@@ -153,6 +213,78 @@ class _ZoomableTextEdit(QTextEdit):
         super().wheelEvent(event)
 
 
+class _HoverPreviewCombo(QComboBox):
+    """قائمة منسدلة تعرض معاينة حية أثناء تحريك الماوس على العناصر
+    وتثبّت الاختيار فقط عند النقر (activated)."""
+
+    from PySide6.QtWidgets import QListView
+
+    hovered_value = Signal(str)
+    committed_value = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._preview_item = -1
+        self._list = self.QListView()
+        self._list.setMouseTracking(True)
+        self._list.viewport().setMouseTracking(True)
+        self._list.setStyleSheet("""
+            QListView { background: #5a5a5a; color: white; font-size: 14px; outline: none; }
+            QListView::item { padding: 5px 10px; }
+            QListView::item:hover { background: #e67e22; color: white; }
+            QListView::item:selected { background: #c26713; color: white; }
+        """)
+        self.setView(self._list)
+
+    def showPopup(self):
+        self._committed = False
+        self._preview_item = -1
+        super().showPopup()
+
+    def _apply_commit(self, index):
+        self._committed = True
+        text = self.itemText(index)
+        self.setCurrentIndex(index)
+        self.committed_value.emit(text)
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self.hidePopup)
+
+    def _on_view_clicked(self, index):
+        self._apply_commit(index.row())
+
+    def _on_activated(self, index):
+        self._apply_commit(index)
+
+    def _on_view_hovered(self, index):
+        row = index.row()
+        if row != self._preview_item:
+            self._preview_item = row
+            text = self.itemText(row)
+            if text:
+                self.hovered_value.emit(text)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
+            super().keyPressEvent(event)
+            idx = self.currentIndex()
+            if idx >= 0 and idx != self._preview_item:
+                self._preview_item = idx
+                self.hovered_value.emit(self.itemText(idx))
+            event.accept()
+            return
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            idx = self.currentIndex()
+            if idx >= 0:
+                self._apply_commit(idx)
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape:
+            super().keyPressEvent(event)
+            return
+        super().keyPressEvent(event)
+
+
 def _icon_emoji(emoji, size=20):
     pix = QPixmap(size, size)
     pix.fill(Qt.transparent)
@@ -164,6 +296,244 @@ def _icon_emoji(emoji, size=20):
     p.drawText(pix.rect(), Qt.AlignCenter, emoji)
     p.end()
     return QIcon(pix)
+
+
+def _line_spacing_icon(size=22):
+    """أيقونة السهم العمودي بجانب ثلاثة خطوط أفقية (التباعد بين الأسطر)."""
+    pix = QPixmap(size, size)
+    pix.fill(Qt.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor(230, 126, 34))
+    pen.setWidth(2)
+    p.setPen(pen)
+
+    cx = size // 2 - 2
+    # السهم العمودي الأوسط
+    p.drawLine(cx, 2, cx, size - 2)
+    p.drawLine(cx - 2, 5, cx, 2)
+    p.drawLine(cx + 2, 5, cx, 2)
+    p.drawLine(cx - 2, size - 5, cx, size - 2)
+    p.drawLine(cx + 2, size - 5, cx, size - 2)
+    # ثلاثة خطوط أفقية على اليمين
+    spacing = (size - 6) / 3
+    for i in range(3):
+        y = int(3 + i * spacing)
+        p.drawLine(cx + 4, y, size - 2, y)
+    p.end()
+    return QIcon(pix)
+
+
+def _shapes_icon(size=28):
+    """أيقونة زر الأشكال: مربع ودائرة ومثلث متلاصقة مع سهم للأسفل."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QBrush
+    pix = QPixmap(size, size)
+    pix.fill(Qt.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.Antialiasing)
+    brush = QBrush(QColor(230, 126, 34))
+    pen = QPen(QColor(230, 126, 34))
+    pen.setWidth(2)
+    p.setPen(pen)
+    p.setBrush(brush)
+    p.drawRect(2, 3, 9, 9)
+    p.drawEllipse(13, 3, 9, 9)
+    p.drawPolygon(QPolygonF([
+        QPointF(size // 2, 14),
+        QPointF(4, 23),
+        QPointF(size - 4, 23),
+    ]))
+    p.setBrush(Qt.NoBrush)
+    p.drawLine(4, size - 3, size - 4, size - 3)
+    p.drawLine(size - 7, size - 6, size - 4, size - 3)
+    p.drawLine(size - 7, size, size - 4, size - 3)
+    p.end()
+    return QIcon(pix)
+
+
+_SHAPES = {
+    "rect": "مستطيل",
+    "rounded_rect": "مستطيل مدوّر",
+    "square": "مربع",
+    "oval": "دائرة / بيضاوي",
+    "triangle": "مثلث",
+    "right_triangle": "مثلث قائم",
+    "diamond": "معيّن",
+    "parallelogram": "متوازي أضلاع",
+    "trapezoid": "شبه منحرف",
+    "hexagon": "سداسي",
+    "star": "نجمة",
+    "heart": "قلب",
+    "arrow_right": "سهم يمين",
+    "arrow_left": "سهم يسار",
+    "arrow_up": "سهم أعلى",
+    "arrow_down": "سهم أسفل",
+    "chevron": "سهم بوكر",
+    "line": "خط",
+    "cross": "صليب",
+    "pentagon": "خماسي",
+    "cloud": "سحابة",
+}
+
+_SHAPE_GROUPS = [
+    ("الأشكال الأساسية", [
+        "rect", "rounded_rect", "square", "oval", "triangle",
+        "right_triangle", "diamond", "parallelogram", "trapezoid",
+        "hexagon", "pentagon", "cross",
+    ]),
+    ("أشكال بارزة", ["star", "heart", "cloud"]),
+    ("أسهم", ["arrow_right", "arrow_left", "arrow_up", "arrow_down", "chevron"]),
+    ("خطوط", ["line"]),
+]
+
+
+class _ShapesMenu(QMenu):
+    """قائمة منسدلة بأيقونات وأسماء الأشكال كما في Word."""
+
+    def __init__(self, parent=None):
+        super().__init__("أشكال", parent)
+        for title, names in _SHAPE_GROUPS:
+            for name in names:
+                act = self.addAction(_shape_icon(name), _SHAPES[name])
+                act.setData(name)
+            self.addSeparator()
+
+
+def _shape_icon(name, size=26):
+    img = _render_shape(name, size, border=True)
+    return QIcon(QPixmap.fromImage(img))
+
+
+def _render_shape(name, size=60, border=False):
+    """يرسم الشكل المطلوب كصورة شفافة بلون برتقالي (مثل بقية الشريط)."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QBrush
+    img = QImage(size, size, QImage.Format_ARGB32)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing)
+    color = QColor(230, 126, 34)
+    if border:
+        brush = QBrush(color)
+        p.setBrush(brush)
+    pen = QPen(color)
+    pen.setWidth(2)
+    p.setPen(pen)
+    m = 2
+    w = size - 2 * m
+    x0, y0 = m, m
+
+    def _poly(points):
+        return QPolygonF([QPointF(a, b) for a, b in points])
+
+    if name == "rect":
+        p.drawRect(x0, y0, w, w)
+    elif name == "rounded_rect":
+        p.drawRoundedRect(x0, y0, w, w, 8, 8)
+    elif name == "square":
+        p.drawRect(x0, y0, w, w)
+    elif name == "oval":
+        p.drawEllipse(x0, y0, w, w)
+    elif name == "triangle":
+        p.drawPolygon(_poly([
+            (size / 2, y0), (x0, y0 + w), (x0 + w, y0 + w),
+        ]))
+    elif name == "right_triangle":
+        p.drawPolygon(_poly([
+            (x0, y0), (x0, y0 + w), (x0 + w, y0 + w),
+        ]))
+    elif name == "diamond":
+        p.drawPolygon(_poly([
+            (size / 2, y0), (x0, size / 2), (size / 2, y0 + w), (x0 + w, size / 2),
+        ]))
+    elif name == "parallelogram":
+        p.drawPolygon(_poly([
+            (x0 + w * 0.25, y0), (x0 + w, y0),
+            (x0 + w * 0.75, y0 + w), (x0, y0 + w),
+        ]))
+    elif name == "trapezoid":
+        p.drawPolygon(_poly([
+            (x0 + w * 0.2, y0), (x0 + w * 0.8, y0),
+            (x0 + w, y0 + w), (x0, y0 + w),
+        ]))
+    elif name == "hexagon":
+        p.drawPolygon(_poly([
+            (x0 + w * 0.25, y0), (x0 + w * 0.75, y0),
+            (x0 + w, y0 + w / 2), (x0 + w * 0.75, y0 + w),
+            (x0 + w * 0.25, y0 + w), (x0, y0 + w / 2),
+        ]))
+    elif name == "pentagon":
+        import math
+        cx, cy, r = size / 2, size / 2, w / 2 - 1
+        pts = []
+        for i in range(5):
+            ang = -math.pi / 2 + i * 2 * math.pi / 5
+            pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+        p.drawPolygon(_poly(pts))
+    elif name == "star":
+        import math
+        cx, cy = size / 2, size / 2
+        outer, inner = w / 2 - 1, w / 4
+        pts = []
+        for i in range(10):
+            r = outer if i % 2 == 0 else inner
+            ang = -math.pi / 2 + i * math.pi / 5
+            pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+        p.drawPolygon(_poly(pts))
+    elif name == "heart":
+        path = QPainterPath()
+        path.moveTo(size / 2, y0 + w - 2)
+        path.cubicTo(x0, y0 + size * 0.55, x0, y0 + size * 0.2, size / 2, y0 + size * 0.18)
+        path.cubicTo(size - x0, y0 + size * 0.2, size - x0, y0 + size * 0.55, size / 2, y0 + w - 2)
+        if border:
+            p.fillPath(path, QBrush(color))
+        p.drawPath(path)
+    elif name == "arrow_right":
+        p.drawPolygon(_poly([
+            (x0, size * 0.3), (x0 + w * 0.6, size * 0.3), (x0 + w * 0.6, y0),
+            (x0 + w, size / 2), (x0 + w * 0.6, size * 0.7), (x0, size * 0.7), (x0, size * 0.3),
+        ]))
+    elif name == "arrow_left":
+        p.drawPolygon(_poly([
+            (x0 + w, size * 0.3), (x0 + w, size * 0.7), (x0 + w * 0.4, size * 0.7),
+            (x0 + w * 0.4, size), (x0, size / 2), (x0 + w * 0.4, y0), (x0 + w * 0.4, size * 0.3),
+        ]))
+    elif name == "arrow_up":
+        p.drawPolygon(_poly([
+            (size * 0.3, y0 + w), (size * 0.7, y0 + w), (size * 0.7, y0 + w * 0.6),
+            (size, y0 + w * 0.6), (size / 2, y0), (x0, y0 + w * 0.6), (size * 0.3, y0 + w * 0.6),
+        ]))
+    elif name == "arrow_down":
+        p.drawPolygon(_poly([
+            (size * 0.3, y0), (size * 0.7, y0), (size * 0.7, y0 + w * 0.4),
+            (size, y0 + w * 0.4), (size / 2, y0 + w), (x0, y0 + w * 0.4), (size * 0.3, y0 + w * 0.4),
+        ]))
+    elif name == "chevron":
+        p.drawPolygon(_poly([
+            (x0, y0), (x0 + w * 0.3, y0), (size / 2, size * 0.15),
+            (x0 + w * 0.3, size * 0.3), (x0, size * 0.3), (x0 + w * 0.2, size * 0.15),
+            (x0, y0),
+        ]))
+    elif name == "cross":
+        cxw = size * 0.22
+        p.drawRect(size / 2 - cxw / 2, y0, cxw, w)
+        p.drawRect(x0, size / 2 - cxw / 2, w, cxw)
+    elif name == "line":
+        p.setPen(pen)
+        p.drawLine(x0 + 2, y0 + w, x0 + w - 2, y0 + 2)
+    elif name == "cloud":
+        path = QPainterPath()
+        path.addEllipse(size * 0.18, size * 0.28, size * 0.4, size * 0.4)
+        path.addEllipse(size * 0.4, size * 0.15, size * 0.42, size * 0.4)
+        path.addEllipse(size * 0.5, size * 0.3, size * 0.4, size * 0.42)
+        if border:
+            p.fillPath(path, QBrush(color))
+        p.drawPath(path)
+    else:
+        p.drawRect(x0, y0, w, w)
+    p.end()
+    return img
 
 
 class _StyleDialog(QDialog):
@@ -317,6 +687,126 @@ class _StyleDialog(QDialog):
         return cursor_fmt, block_fmt
 
 
+class ResizableShapeItem(QGraphicsObject):
+    HANDLE_R = 4
+    LINE_LEN = 5
+    MIN_SIZE = 20
+
+    def __init__(self, pixmap, shape_name="rect"):
+        super().__init__()
+        self._pix = pixmap
+        self._shape_name = shape_name
+        self._rect = QRectF(0, 0, pixmap.width(), pixmap.height())
+        self._drag_handle = -1
+        self._drag_rect = None
+        self._drag_start = None
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+
+    def boundingRect(self):
+        m = self.HANDLE_R + 2
+        return self._rect.adjusted(-m, -m, m, m)
+
+    def paint(self, painter, option, widget):
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.drawPixmap(self._rect, self._pix)
+        if self.isSelected():
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor(0, 120, 215), 1.5))
+            painter.drawRect(self._rect)
+            painter.setBrush(Qt.white)
+            painter.setPen(QPen(QColor(0, 120, 215), 1.5))
+            for pt in self._corner_handles():
+                painter.drawEllipse(pt, self.HANDLE_R, self.HANDLE_R)
+            for pt in self._edge_handles():
+                painter.drawRect(QRectF(pt.x() - self.LINE_LEN, pt.y() - 1.5,
+                                        self.LINE_LEN * 2, 3))
+                painter.drawRect(QRectF(pt.x() - 1.5, pt.y() - self.LINE_LEN,
+                                        3, self.LINE_LEN * 2))
+
+    def _corner_handles(self):
+        r = self._rect
+        return [r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight()]
+
+    def _edge_handles(self):
+        r = self._rect
+        cx = (r.left() + r.right()) / 2
+        cy = (r.top() + r.bottom()) / 2
+        return [QPointF(cx, r.top()), QPointF(r.right(), cy),
+                QPointF(cx, r.bottom()), QPointF(r.left(), cy)]
+
+    def _handle_at(self, pos):
+        for i, pt in enumerate(self._corner_handles()):
+            if (pos - pt).manhattanLength() <= self.HANDLE_R * 5:
+                return i
+        for i, pt in enumerate(self._edge_handles(), start=4):
+            if (pos - pt).manhattanLength() <= self.LINE_LEN * 3:
+                return i
+        return -1
+
+    def mousePressEvent(self, event):
+        self._drag_handle = self._handle_at(event.pos())
+        if self._drag_handle >= 0:
+            self._drag_rect = QRectF(self._rect)
+            self._drag_start = event.pos()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_handle >= 0:
+            d = event.pos() - self._drag_start
+            r = QRectF(self._drag_rect)
+            h = self._drag_handle
+            if h < 4:
+                ar = self._drag_rect.width() / max(self._drag_rect.height(), 1)
+                if h == 0:
+                    ox, oy = self._drag_rect.right(), self._drag_rect.bottom()
+                    sx, sy = -1, -1
+                elif h == 1:
+                    ox, oy = self._drag_rect.left(), self._drag_rect.bottom()
+                    sx, sy = 1, -1
+                elif h == 2:
+                    ox, oy = self._drag_rect.right(), self._drag_rect.top()
+                    sx, sy = -1, 1
+                else:
+                    ox, oy = self._drag_rect.left(), self._drag_rect.top()
+                    sx, sy = 1, 1
+                dx = self._drag_rect.width() * sx + d.x()
+                dy = self._drag_rect.height() * sy + d.y()
+                adx, ady = abs(dx), abs(dy)
+                if adx / max(ady, 1) > ar:
+                    ady = adx / ar
+                else:
+                    adx = ady * ar
+                w, hh = adx, ady
+                nx = ox - w if sx < 0 else ox
+                ny = oy - hh if sy < 0 else oy
+                r = QRectF(nx, ny, w, hh)
+            else:
+                if h == 4:
+                    r.setTop(r.top() + d.y())
+                elif h == 5:
+                    r.setRight(r.right() + d.x())
+                elif h == 6:
+                    r.setBottom(r.bottom() + d.y())
+                elif h == 7:
+                    r.setLeft(r.left() + d.x())
+            if r.width() >= self.MIN_SIZE and r.height() >= self.MIN_SIZE:
+                self.prepareGeometryChange()
+                self._rect = r
+                self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_handle = -1
+        self._drag_rect = None
+        super().mouseReleaseEvent(event)
+
+
 class TextEditor(QWidget):
     go_back = Signal()
 
@@ -374,11 +864,15 @@ class TextEditor(QWidget):
 
         toolbar1.addSeparator()
 
-        self._combo_size = QComboBox()
+        self._combo_size = _HoverPreviewCombo()
         self._combo_size.setEditable(True)
         self._combo_size.addItems([str(s) for s in [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72]])
         self._combo_size.setCurrentText("14")
         self._combo_size.setMaximumWidth(60)
+        self._combo_size._list.entered.connect(self._combo_size._on_view_hovered)
+        self._combo_size.activated.connect(self._combo_size._on_activated)
+        self._combo_size.hovered_value.connect(self._preview_font_size)
+        self._combo_size.committed_value.connect(self._apply_font_size)
         self._combo_size.currentTextChanged.connect(self._on_size_changed)
         toolbar1.addWidget(self._combo_size)
 
@@ -396,21 +890,31 @@ class TextEditor(QWidget):
 
         toolbar1.addSeparator()
 
-        btn_bold = QPushButton("عريض")
+        btn_bold = QPushButton("B")
         btn_bold.setCheckable(True)
         btn_bold.setToolTip("تثخين (Ctrl+B)")
+        btn_bold.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        btn_bold.setFixedWidth(34)
         btn_bold.clicked.connect(self._toggle_bold)
         toolbar1.addWidget(btn_bold)
 
-        btn_italic = QPushButton("مائل")
+        btn_italic = QPushButton("I")
         btn_italic.setCheckable(True)
         btn_italic.setToolTip("مائل (Ctrl+I)")
+        f = QFont("Segoe UI", 12)
+        f.setItalic(True)
+        btn_italic.setFont(f)
+        btn_italic.setFixedWidth(34)
         btn_italic.clicked.connect(self._toggle_italic)
         toolbar1.addWidget(btn_italic)
 
-        btn_underline = QPushButton("تحته خط")
+        btn_underline = QPushButton("U")
         btn_underline.setCheckable(True)
         btn_underline.setToolTip("تحته خط (Ctrl+U)")
+        f_u = QFont("Segoe UI", 12)
+        f_u.setUnderline(True)
+        btn_underline.setFont(f_u)
+        btn_underline.setFixedWidth(34)
         btn_underline.clicked.connect(self._toggle_underline)
         toolbar1.addWidget(btn_underline)
 
@@ -477,7 +981,8 @@ class TextEditor(QWidget):
 
         toolbar2.addSeparator()
 
-        btn_line_spacing = QPushButton("↕")
+        btn_line_spacing = QPushButton(_line_spacing_icon(), "")
+        btn_line_spacing.setIconSize(QSize(22, 22))
         btn_line_spacing.setToolTip("التباعد السطري")
         btn_line_spacing.clicked.connect(self._change_line_spacing)
         toolbar2.addWidget(btn_line_spacing)
@@ -505,6 +1010,12 @@ class TextEditor(QWidget):
         btn_insert_image = QPushButton("صورة")
         btn_insert_image.clicked.connect(self._insert_image)
         toolbar3.addWidget(btn_insert_image)
+
+        btn_shapes = QPushButton(_shapes_icon(), "أشكال")
+        btn_shapes.setToolTip("إدراج أشكال")
+        btn_shapes.setLayoutDirection(Qt.LeftToRight)
+        btn_shapes.clicked.connect(self._open_shapes_menu)
+        toolbar3.addWidget(btn_shapes)
 
         btn_insert_hr = QPushButton("——")
         btn_insert_hr.setToolTip("خط أفقي")
@@ -745,6 +1256,27 @@ class TextEditor(QWidget):
         self.editor.setCurrentCharFormat(fmt)
         self.editor.setFocus()
 
+    def _apply_font_size(self, text):
+        try:
+            self._font_size = int(text)
+        except ValueError:
+            return
+        cursor = self.editor.textCursor()
+        fmt = cursor.charFormat()
+        fmt.setFontPointSize(self._font_size)
+        self.editor.setCurrentCharFormat(fmt)
+        self.editor.setFocus()
+
+    def _preview_font_size(self, text):
+        try:
+            size = int(text)
+        except ValueError:
+            return
+        cursor = self.editor.textCursor()
+        fmt = cursor.charFormat()
+        fmt.setFontPointSize(size)
+        self.editor.setCurrentCharFormat(fmt)
+
     def _toggle_bold(self):
         cursor = self.editor.textCursor()
         fmt = QTextCharFormat()
@@ -846,13 +1378,46 @@ class TextEditor(QWidget):
 
     def _change_line_spacing(self):
         items = ["1.0", "1.15", "1.5", "2.0", "2.5", "3.0"]
-        current, ok = QInputDialog.getItem(self, "التباعد السطري", "اختر التباعد:", items, 2, False)
-        if ok:
-            cursor = self.editor.textCursor()
-            block_fmt = QTextBlockFormat()
-            line_height = int(float(current) * 100)
-            block_fmt.setLineHeight(line_height, 1)
-            cursor.mergeBlockFormat(block_fmt)
+        combo = _HoverPreviewCombo(self)
+        combo.setEditable(False)
+        combo.addItems(items)
+        combo.setCurrentIndex(2)
+        combo.setFixedWidth(130)
+        combo.setStyleSheet("""
+            QComboBox { background: #666; color: white; border: 1px solid #555;
+                        padding: 5px; border-radius: 4px; font-size: 14px; }
+            QComboBox QAbstractItemView { background: #5a5a5a; color: white;
+                         selection-background-color: #e67e22; font-size: 14px; }
+        """)
+        combo._list.entered.connect(combo._on_view_hovered)
+        combo.activated.connect(combo._on_activated)
+
+        box = QDialog(self)
+        box.setWindowFlags(Qt.Popup)
+        box.setStyleSheet("QDialog { background: #5a5a5a; border: 1px solid #777; }")
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.addWidget(combo)
+        combo.setFocus()
+
+        def _apply_and_close(text):
+            self._apply_line_spacing(text)
+            box.accept()
+            logger.info("تثبيت التباعد السطري: %s", text)
+
+        combo.hovered_value.connect(self._apply_line_spacing)
+        combo.committed_value.connect(_apply_and_close)
+        box.exec()
+
+    def _apply_line_spacing(self, value):
+        try:
+            line_height = int(float(value) * 100)
+        except ValueError:
+            return
+        cursor = self.editor.textCursor()
+        block_fmt = QTextBlockFormat()
+        block_fmt.setLineHeight(line_height, 1)
+        cursor.mergeBlockFormat(block_fmt)
 
     def _increase_indent(self):
         cursor = self.editor.textCursor()
@@ -918,6 +1483,53 @@ class TextEditor(QWidget):
                 scaled = image.scaled(400, 300, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 cursor.insertImage(scaled.toImage())
                 logger.info("إدراج صورة: %s", os.path.basename(path))
+
+    def _open_shapes_menu(self):
+        btn = self.sender()
+        menu = _ShapesMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background: #5a5a5a; color: white; border: 1px solid #777; }
+            QMenu::item { padding: 6px 20px 6px 10px; }
+            QMenu::item:selected { background: #e67e22; color: white; }
+            QMenu::separator { height: 1px; background: #777; }
+        """)
+        menu.triggered.connect(self._start_shape_draw)
+        pos = btn.mapToGlobal(btn.rect().bottomLeft())
+        menu.exec(pos)
+
+    def _start_shape_draw(self, action):
+        name = action.data()
+        if name not in _SHAPES:
+            return
+        if not hasattr(self, "_shape_drawn_connected"):
+            self.editor.shape_drawn.connect(self._finish_shape_draw)
+            self._shape_drawn_connected = True
+        self.editor.setFocus()
+        self.editor.set_shape_draw_mode(name)
+        logger.info("بدأ وضع رسم الشكل: %s", name)
+
+    def _finish_shape_draw(self, shape, rect):
+        w = max(int(rect.width()), 12)
+        h = max(int(rect.height()), 12)
+        img = _render_shape(shape, size=max(w, h))
+        if img is None:
+            return
+        scaled = img.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        vp_x = rect.x()
+        vp_y = rect.y()
+        origin_in_scene = self._proxy.mapToScene(
+            self.editor.mapToParent(QPoint(0, 0))
+        )
+        scene_x = origin_in_scene.x() + vp_x
+        scene_y = origin_in_scene.y() + vp_y
+        pix = QPixmap.fromImage(scaled)
+        shape_item = ResizableShapeItem(pix, shape)
+        shape_item.setPos(scene_x, scene_y)
+        shape_item.setZValue(10)
+        self._scene.addItem(shape_item)
+        self._scene.clearSelection()
+        shape_item.setSelected(True)
+        logger.info("إدراج شكل في المشهد: %s بقياس %dx%d عند (%.0f, %.0f)", shape, w, h, scene_x, scene_y)
 
     def _insert_horizontal_line(self):
         cursor = self.editor.textCursor()

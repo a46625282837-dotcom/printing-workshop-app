@@ -1,10 +1,11 @@
 import logging
 import os
-import sys
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageColor
+
+from core.runtime import resource_path
 
 logger = logging.getLogger(__name__)
 
@@ -13,9 +14,7 @@ FW, FH = 320, 560  # final garment resolution (portrait)
 
 
 def _img_dir():
-    if getattr(sys, 'frozen', False):
-        return os.path.join(sys._MEIPASS, 'img')
-    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'img')
+    return resource_path('img')
 
 
 CLOTHES_DIR = os.path.join(_img_dir(), 'clothes')

@@ -2,9 +2,12 @@ import sys
 import os
 import json
 import logging
-from PySide6.QtWidgets import QApplication
+import threading
+from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtGui import QIcon
+from PySide6.QtCore import QTimer
 from app import IDCardApp
+from version import APP_VERSION
 
 logging.basicConfig(
     level=logging.INFO,
@@ -12,17 +15,17 @@ logging.basicConfig(
 )
 
 
-_SERVER_URL = "https://printing-workshop-api.onrender.com"
+_SERVER_URL = "https://web-production-3ebb.up.railway.app"
 
 
 def _frozen_path():
-    if getattr(sys, "frozen", False):
-        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
-    return os.path.dirname(__file__)
+    from core.runtime import bundle_root
+    return bundle_root()
 
 
 def _data_dir():
-    return os.path.join(_frozen_path(), "data")
+    from core.runtime import data_dir
+    return data_dir()
 
 
 def _load_config():
@@ -37,7 +40,12 @@ def _load_config():
 
 
 def _icon_path():
-    return os.path.join(_frozen_path(), "i1.ico")
+    from core.runtime import resource_path
+    for cand in ("i1.ico", "i1.jpeg", "img/i1.png", "img/i1.jpeg"):
+        p = resource_path(cand)
+        if os.path.exists(p):
+            return p
+    return resource_path("i1.ico")
 
 
 def _register_wwk_extension():
@@ -67,7 +75,6 @@ def _register_wwk_extension():
         logging.warning("فشل تسجيل امتداد .wwk: %s", e)
 
 
-APP_VERSION = "2.1.0"
 _GITHUB_REPO = "a46625282837-dotcom/printing-workshop-app"
 _DOWNLOAD_PAGE = "https://a46625282837-dotcom.github.io/worsha-download/"
 
@@ -100,7 +107,59 @@ def _update_contexts():
     }
 
 
+def _start_bg_warmup():
+    """تحميل نموذج إزالة الخلفية في الخلفية حتى لا ينتظر المستخدم أول صورة.
+
+    لا يغيّر أي نتيجة — يبني جلسة rembg مبكراً بنفس النموذج والمنطق الذي
+    كان يُبنى عند أول قصّ. السقوط صامت عند أي فشل (يبقى السلوك القديم).
+    """
+    try:
+        def run():
+            try:
+                from core.photo_processor import warmup_rembg
+                warmup_rembg()
+            except Exception:
+                pass
+        threading.Thread(target=run, daemon=True).start()
+    except Exception as e:
+        logging.warning("فشل تشغيل تدفئة النموذج: %s", e)
+
+
+def _handle_cli_flags():
+    """أوامر صامتة مفيدة للمطور: --selftest، --diag."""
+    args = [a for a in sys.argv[1:] if a in ("--selftest", "--diag")]
+    if "--selftest" in args:
+        from core import selftest
+        sys.exit(selftest.run())
+    if "--diag" in args:
+        from core import selfcheck
+        print(selfcheck.build_report()[0])
+        sys.exit(0)
+
+
+def _show_startup_issues(problems):
+    """إذا وجد فحص الإقلاع نقصاً حرجاً — رسالة عربية واضحة بدل أقسام ميتة صامتة."""
+    if not problems:
+        return
+    try:
+        from core.runtime import diagnostics_path
+        short = list(dict.fromkeys(problems))[:4]
+        body = "\n".join("• " + p for p in short)
+        more = "..." if len(problems) > 4 else ""
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("تنبيه - ملف التشخيص")
+        box.setText("يوجد نقص في الملفات الأساسية قد يعطّل بعض الأقسام.")
+        box.setInformativeText(
+            body + more +
+            "\n\nأرسل هذا الملف إلى المطور لتشخيص المشكلة:\n" + diagnostics_path())
+        box.exec()
+    except Exception as e:
+        logging.warning("فشل عرض تنبيه التشخيص: %s", e)
+
+
 def main():
+    _handle_cli_flags()
     frozen = getattr(sys, "frozen", False)
     if frozen:
         use_api = True
@@ -114,7 +173,15 @@ def main():
         from core import api_client
         api_client.set_server_url(server_url)
         logging.info("API mode enabled: %s", server_url)
+    startup_problems = []
+    try:
+        from core import selfcheck
+        startup_problems = selfcheck.write_diagnostics()
+        logging.info("تقرير التشخيص مكتوب: %d مشكلة أولية", len(startup_problems))
+    except Exception as e:
+        logging.warning("فشل فحص الإقلاع: %s", e)
     _register_wwk_extension()
+    _start_bg_warmup()
     app = QApplication(sys.argv)
     app.setApplicationName("ورشة طباعة")
     icon = QIcon(_icon_path())
@@ -122,6 +189,8 @@ def main():
         app.setWindowIcon(icon)
     window = IDCardApp(use_api=use_api, update_ctx=_update_contexts())
     window.show()
+    if frozen and startup_problems:
+        QTimer.singleShot(2000, lambda: _show_startup_issues(startup_problems))
     file_arg = None
     for arg in sys.argv[1:]:
         if os.path.isfile(arg) and arg.lower().endswith(".wwk"):

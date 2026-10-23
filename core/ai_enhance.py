@@ -1,378 +1,266 @@
-"""Professional Photo Enhancement — GFPGAN + Real-ESRGAN (Remini-quality).
+"""تحسين الصور للطباعة — كبح ضوضاء مقنَّع ثم توضيح حواف خفيف.
 
-Uses PyTorch deep learning models for face restoration and detail enhancement.
-GFPGAN v1.4 for face restoration, RealESRGAN for background detail sharpening.
-Falls back to MediaPipe + OpenCV if models unavailable.
+القياس على صور المستخدم الحقيقية (900×1600 و960×1280 و901×901) أثبت أن
+المشكلة ليست الضبابية: الصور حادّة أصلاً، والمحسِّن القديم يضيف إليها
+‎+9…18% ضوضاء لون هي بالضبط «الحبّات المرئية» التي شكا منها المستخدم،
+بينما لا يضيف سوى ‎×1.09 حِدّة. لذلك الرحلة الآن:
+
+1) كبح ضوضاء اللون (a/b) دائماً — فهي لا تحمل تفصيلاً مرئياً (كل مسامّ
+   البشرة في قناة الإضاءة) فتنقيتها لا تُفقد شيئاً وتزيل الحبيبات.
+2) كبح ضوضاء الإضاءة فوق السطح المسطّح فقط (بشرة/خلفية) حفاظاً على المسام.
+3) توضيح الحواف على الإضاءة، محكوم ببوابة البنية، بلا مساس بالبشرة.
+4) لا تكبير ولا توليد تفاصيل ولا تعديل سطوع/تباين: أي رفع للسطوح يغيّر
+   لون البشرة المُدرَك فيرى المستخدم بقعاً حمراء أو داكنة.
 """
 import logging
-import os
-import sys
 import numpy as np
 from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-WEIGHTS_DIR = os.path.join(os.path.expanduser("~"), ".cache", "wwk_ai")
-
-_GFPGANER = None
-_REALESRGANER = None
-_init_done = False
+# قيم مضبوطة متحفّظة: النتيجة نظيفة من الضغطة الأولى مع بقاء الصورة طبيعية.
+DEFAULT_DENOISE = 1.0       # وزن كبح الضوضاء (0 = تعطيل)
+CHROMA_SIGMA = 6.0          # bilateral على a/b: يزيل الحبّات اللونية بلا مساس بالبنية
+LUMA_SIGMA = 18.0           # bilateral على L داخل السطح المسطّح فقط
+LUMA_FLAT_MAX = 0.30        # تحت هذه البوابة يُعدّ السطح نظيفاً قابلاً للتنقية
+DEFAULT_SHARPEN = 2.40      # أقصى مقدار تحديد الحواف (للصور الأكثر ضبابية)
+BASE_SHARPEN = 0.45         # حدّ أساسي يُطبَّق على كل صورة
+DEFAULT_THRESHOLD = 5.0     # أدنى تفصيلة تُحدَّد (يحمي البشرة المسطحة والورق)
+MAX_STEP = 8.0              # أقصى تغيّر في الإضاءة لكل بكسل — يمنع الهالة والخط الداكن
+CLARITY_SIGMA = 3.5         # مقياس الوضوح المتوسط (بنفس البوابة: لا يسرّب إلى البشرة)
+CLARITY_MAX = 0.45          # نصيب المقياس المتوسط من المقدار
+GATE_WINDOW = 1.5           # نافذة قياس بنية الصورة
+GATE_COH_LOW = 0.45         # أقل تماسك يُسمح بالتوضيح فوقه (فوقه حافة أو خط)
+GATE_COH_HIGH = 0.75        # التماسك الذي يصبح عنده التوضيح كاملاً
+GATE_EN_LOW = 0.08          # أدنى طاقة حدّية نسبية (تحتها نسيج لا حافة)
+GATE_EN_HIGH = 0.25         # طاقة حدّية تُعدّ كاملة
+DEFAULT_CONTRAST = 1.0      # لا تعديل تباين افتراضياً (حماية لون البشرة)
+DARK_MEAN = 88.0            # متوسط إضاءة الصورة المعتمة
+BRIGHT_MEAN = 208.0         # متوسط إضاءة الصورة الساطعة جداً
+TARGET_ACUTANCE = 55.0      # حِدّة الإضاءة المستهدفة (تقيس الضبابية)
 
 
 def is_available() -> bool:
+    """التحسين متاح دائماً: يعتمد على OpenCV فقط بلا أي نماذج أو تحميل."""
     try:
-        import torch
-        import cv2
+        import cv2  # noqa: F401
         return True
     except ImportError:
         return False
 
 
-def _init_models():
-    global _GFPGANER, _REALESRGANER, _init_done
-    if _init_done:
-        return
-    _init_done = True
-
-    try:
-        import torch
-        from gfpgan import GFPGANer
-
-        model_path = os.path.join(WEIGHTS_DIR, "GFPGANv1.4.pth")
-        if not os.path.exists(model_path):
-            _download(
-                "https://huggingface.co/Apex-X/gfpgan.pth/resolve/main/GFPGANv1.4.pth",
-                model_path,
-            )
-
-        _GFPGANER = GFPGANer(
-            model_path=model_path,
-            upscale=1,
-            arch="clean",
-            channel_multiplier=2,
-            bg_upsampler=None,
-        )
-        logger.info("GFPGAN v1.4 loaded")
-    except Exception as e:
-        logger.warning("GFPGAN init failed: %s", e)
-
-    try:
-        import torch
-        from basicsr.archs.rrdbnet_arch import RRDBNet
-        from realesrgan import RealESRGANer
-
-        model_path = os.path.join(WEIGHTS_DIR, "RealESRGAN_x4plus.pth")
-        if not os.path.exists(model_path):
-            _download(
-                "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
-                model_path,
-            )
-
-        model = RRDBNet(
-            num_in_ch=3,
-            num_out_ch=3,
-            num_feat=64,
-            num_block=23,
-            num_grow_ch=32,
-            scale=4,
-        )
-        _REALESRGANER = RealESRGANer(
-            scale=4,
-            model_path=model_path,
-            model=model,
-            tile=400,
-            tile_pad=10,
-            pre_pad=0,
-            half=False,
-        )
-        logger.info("RealESRGAN loaded")
-    except Exception as e:
-        logger.warning("RealESRGAN init failed: %s", e)
+def _split_luma(bgr):
+    """يفصل الإضاءة عن الألوان: L للإضاءة، a/b لون الصورة (لا تُمسّان)."""
+    import cv2
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
 
 
-def _download(url, dest):
-    import urllib.request
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    logger.info("تحميل %s …", os.path.basename(dest))
-    urllib.request.urlretrieve(url, dest)
-    logger.info("تم التحميل → %s (%.1f MB)", dest, os.path.getsize(dest) / 1024 / 1024)
+def _acutance(l):
+    """مقياس ضبابية الصورة: متوسط مقدار تدرّج الإضاءة (Sobel)."""
+    import cv2
+    gx = cv2.Sobel(l, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(l, cv2.CV_32F, 0, 1, ksize=3)
+    return float(np.sqrt(gx * gx + gy * gy).mean())
 
 
-def _color_correct(original, enhanced, face_mask=None):
+def _adaptive_need(l):
+    """كم تحتاج الصورة من التوضيح: 0 لصورة حادّة، 1 لصورة ضبابية تماماً."""
+    cur = _acutance(l)
+    if cur < 1e-3:
+        return 0.0
+    return float(np.clip(TARGET_ACUTANCE / cur - 1.0, 0.0, 1.0))
+
+
+def _soft_threshold(detail, threshold):
+    """حذّ أدنى ناعم: صفر تحت الحدّ ثم ارتفاع تدريجي.
+
+    الحبيبات والجلد والورق تحت الحدّ لا تُلمس إطلاقاً، والحواف الحقيقية
+    فوقه تُحدَّد بسلاسة فلا تظهر تدرّجات أفقية (terracing) في البشرة.
+    """
+    if threshold <= 0:
+        return detail
+    mag = np.abs(detail)
+    t = float(threshold)
+    knee = np.clip((mag - t) / t, 0.0, 1.0)
+    knee = knee * knee * (3.0 - 2.0 * knee)
+    return np.sign(detail) * mag * knee
+
+
+def _smoothstep(x, lo, hi):
+    t = np.clip((x - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _detail_gate(l, window):
+    """بوابة تسمح بتوضيح الحواف والشعر والملابس فقط، وتمنع المسام والبشرة.
+
+    الفكرة بنية الصورة لا لونها: نسيج المسام والجلد *غير موجّه* (تماسك منخفض)
+    أما الحواف والشعر والخطوط فمتجهة (تماسك عالٍ). لذلك يُقاس التماسك من
+    متجه البنية، فيُحظر التوضيح فوق البشرة والورق والجلد وتبقى العينان
+    والشعر والملابس حادّة — بغض النظر عن درجة البشرة أو الإضاءة، فلا حاجة
+    لتقدير لون البشرة ولا خطر من قصور التقدير.
+    """
+    import cv2
+    g = np.ascontiguousarray(l, dtype=np.float32)
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
+    jxx = cv2.GaussianBlur(gx * gx, (0, 0), window)
+    jyy = cv2.GaussianBlur(gy * gy, (0, 0), window)
+    jxy = cv2.GaussianBlur(gx * gy, (0, 0), window)
+    tr = jxx + jyy
+    det = jxx * jyy - jxy * jxy
+    disc = np.sqrt(np.maximum(tr * tr * 0.25 - det, 0.0))
+    l1 = tr * 0.5 + disc
+    l2 = tr * 0.5 - disc
+    coh = (l1 - l2) / (l1 + l2 + 1e-6)
+    e_ref = float(np.percentile(l1, 90.0))
+    if e_ref <= 0.0:
+        return np.zeros_like(l)
+    gate = _smoothstep(coh, GATE_COH_LOW, GATE_COH_HIGH)
+    return gate * _smoothstep(l1 / e_ref, GATE_EN_LOW, GATE_EN_HIGH)
+
+
+def _denoise_chroma(a, b, amount):
+    """كبح ضوضاء اللون وحدها (بلا إضاءة) — يُنفَّذ مرّتين: قبل التوضيح وبعده.
+
+    السبب: تعديل الإضاءة ثم إعادة الترميز إلى RGB يperturb قنوات a/b المستخرجة
+    من الصورة، فيولّد حبيبات لونية جديدة. repass أخير بعد التوضيح يمحوها.
+    """
+    import cv2
+    if amount <= 0:
+        return a, b
+    w = min(1.0, float(amount))
+    d = 5 if max(a.shape) < 1600 else 7
+    a_s = cv2.bilateralFilter(a, d, CHROMA_SIGMA, 3.0).astype(np.float32)
+    b_s = cv2.bilateralFilter(b, d, CHROMA_SIGMA, 3.0).astype(np.float32)
+    return a * (1.0 - w) + a_s * w, b * (1.0 - w) + b_s * w
+
+
+def _denoise(l, a, b, amount):
+    """يكبح ضوضاء الصورة: لوناً دائماً، وإضاءةً فوق السطح المسطّح فقط.
+
+    قناتا a/b لا تحملان تفصيلاً مرئياً — مسامّ البشرة وخطوط الوجه كلها في
+    قناة الإضاءة — فكبحهما لا يُفقد شيئاً يُرى، بل يزيل الحبيبات الملوّنة
+    التي يزيدها التوضيح لاحقاً. والـbilateral حافظ للحواف وخامل على الصورة
+    النظيفة بطبيعته، فلا يحتاج حدّاً للتكيّف.
+
+    أمّا إضاءة السطح المسطّح (بشرة/خلفية/ورق) فتنقّى فقط حيث لا بنية،
+    حفاظاً على مسامّ الوجه؛ العين والشعر وخطوط الملابس لا تمسّها البوابة.
+    """
+    import cv2
+    if amount <= 0:
+        return l, a, b
+    w = min(1.0, float(amount))
+    d = 5 if max(l.shape) < 1600 else 7
+
+    a, b = _denoise_chroma(a, b, w)
+    flat = np.clip(1.0 - _detail_gate(l, GATE_WINDOW) / LUMA_FLAT_MAX, 0.0, 1.0) * w
+    if float(flat.max()) > 0.01:
+        l_s = cv2.bilateralFilter(np.clip(l, 0, 255).astype(np.uint8), d,
+                                  LUMA_SIGMA, 4.0).astype(np.float32)
+        l = l * (1.0 - flat) + l_s * flat
+    return l, a, b
+
+
+def _clarity(l, amount, threshold):
+    """زيادة الوضوح على الإضاءة فقط، فوق الحواف والشعر والملابس فقط.
+
+    Unsharp Mask بمقياس واحد يحدّد الحواف المفصّلة: العين، الرموش، الشعر،
+    خطوط الملابس والحروف. لا مقياس Clarity واسع: كان يعمل على البشرة نفسها،
+    وهو مصدر البقع الذي شكا منه المستخدم — فأُسقط عمداً.
+
+    كل التوضيح يمرّ عبر _detail_gate، فالمناطق غير الموجّهة (بشرة، مسام،
+    جلد ناعم، ورق) لا تتغيّر إطلاقاً. ويبقى حدّ أقصى للتفصيلة يمنع الهالات،
+    ومقدار تكيّفي يجعل الصور الواضحة أصلاً تأخذ الحدّ الأدنى.
+
+    كبح الضوضاء ليس هنا: _denoise يسبقه على.channel L وبوابة السطح المسطّح.
+    """
+    import cv2
+    if amount <= 0:
+        return l
+    need = _adaptive_need(l)
+    amt = min(BASE_SHARPEN, amount) + need * max(0.0, amount - BASE_SHARPEN)
+    if amt <= 0:
+        return l
+    # تحديد الحواف المفصّلة (العين، الرموش، الشعر، خطوط الملابس)
+    sigma = max(0.8, min(2.0, min(l.shape) / 900.0))
+    gate = _detail_gate(l, GATE_WINDOW)
+    delta = _soft_threshold(l - cv2.GaussianBlur(l, (0, 0), sigma), threshold)
+    if CLARITY_SIGMA > 0:
+        # مقياس متوسط البنفس البوابة: يزيد الوضوح الظاهر دون تسريب إلى البشرة
+        mid = _soft_threshold(
+            l - cv2.GaussianBlur(l, (0, 0), CLARITY_SIGMA), threshold)
+        delta = delta + (amt * CLARITY_MAX) * mid
+    l = l + np.clip(amt * delta * gate, -MAX_STEP, MAX_STEP)
+    return l
+
+
+def _tone(l, contrast, lo, hi):
+    """تباين اختياري داخل المدى اللوني الأصلي للصورة (معطّل افتراضياً).
+
+    معطّل افتراضياً (contrast=1.0) عن قصد: أي رفع للسطوع أو تغيّر في
+    التباين يغيّر لون البشرة المُدرَك (الأغمق أدفأ، الأفتح أكثر وردي) فيرى
+    المستخدم بقعاً حمراء أو داكنة. من يطلب زيادة تباين يفعّلها تمريراً
+    صريحاً. المنحنى مُطبَّع على [lo, hi] فلا يمدّ المدى ولا يقصّ التفاصيل.
+    """
+    if not contrast or abs(contrast - 1.0) <= 1e-3 or not hi > lo:
+        return l
+    span = hi - lo
+    t = np.clip((l - lo) / span, 0.0, 1.0)
+    t = t + (t - 0.5) * (float(contrast) - 1.0) * 4.0 * t * (1.0 - t)
+    return lo + np.clip(t, 0.0, 1.0) * span
+
+
+def _soft_limit(l, lo, hi, soft=8.0):
+    """تحديد ناعم للتجاوز بدل القصّ الحاد عند 0/255.
+
+    القصّ np.clip يجعل البكسلات القريبة من الأسود أو الأبيض متطابقة فيظهر
+    خط قاسٍ وتضيع التفاصيل. هنا يبقى أي تجاوز ناعماً، ونقطتا الأسود
+    والأبيض في الصورة الأصلية (lo/hi) لا تتحركان إطلاقاً، فتبقى الصورة
+    على نفس مداها اللوني.
+    """
+    if not hi > lo:
+        return l
+    y = np.where(l > hi, hi + soft * (1.0 - np.exp(-(l - hi) / soft)), l)
+    return np.where(y < lo, lo - soft * (1.0 - np.exp(-(lo - y) / soft)), y)
+
+
+def enhance_image(pil_image, denoise=DEFAULT_DENOISE, sharpen=DEFAULT_SHARPEN,
+                  threshold=DEFAULT_THRESHOLD, contrast=DEFAULT_CONTRAST):
+    """يزيد وضوح الصورة للطباعة مع الحفاظ على ملامح الوجه والألوان 100%.
+
+    الخطوات كلها على قناة الإضاءة: Unsharp Mask للحواف الدقيقة مع إبراز
+    الملامح بنصف قطر واسع، ثم ضبط خفيف للسطوع والتباين. لا تكبير ولا توليد
+    تفاصيل ولا مساس بالبشرة.
+    """
     import cv2
 
-    orig_lab = cv2.cvtColor(original, cv2.COLOR_BGR2LAB).astype(np.float32)
-    enh_lab = cv2.cvtColor(enhanced, cv2.COLOR_BGR2LAB).astype(np.float32)
+    if pil_image is None:
+        return pil_image
+    img = np.asarray(pil_image.convert("RGB"))
+    if img.size == 0 or img.ndim != 3:
+        return pil_image
 
-    for ch in range(3):
-        o_mean = np.mean(orig_lab[:, :, ch])
-        o_std = np.std(orig_lab[:, :, ch]) + 1e-6
-        e_mean = np.mean(enh_lab[:, :, ch])
-        e_std = np.std(enh_lab[:, :, ch]) + 1e-6
-
-        enh_lab[:, :, ch] = (enh_lab[:, :, ch] - e_mean) * (o_std / e_std) + o_mean
-
-    result = np.clip(enh_lab, 0, 255).astype(np.uint8)
-    result = cv2.cvtColor(result, cv2.COLOR_LAB2BGR)
-
-    if face_mask is not None:
-        mask_f = cv2.GaussianBlur(
-            face_mask.astype(np.float32) / 255.0, (31, 31), 0
-        )[:, :, np.newaxis]
-        result = np.clip(
-            result.astype(np.float32) * mask_f
-            + enhanced.astype(np.float32) * (1 - mask_f),
-            0,
-            255,
-        ).astype(np.uint8)
-
-    return result
-
-
-def _color_correct_full(original, enhanced):
-    import cv2
-
-    orig_lab = cv2.cvtColor(original, cv2.COLOR_BGR2LAB).astype(np.float32)
-    enh_lab = cv2.cvtColor(enhanced, cv2.COLOR_BGR2LAB).astype(np.float32)
-
-    for ch in range(3):
-        o_mean = np.mean(orig_lab[:, :, ch])
-        o_std = np.std(orig_lab[:, :, ch]) + 1e-6
-        e_mean = np.mean(enh_lab[:, :, ch])
-        e_std = np.std(enh_lab[:, :, ch]) + 1e-6
-        enh_lab[:, :, ch] = (enh_lab[:, :, ch] - e_mean) * (o_std / e_std) + o_mean
-
-    result = np.clip(enh_lab, 0, 255).astype(np.uint8)
-    return cv2.cvtColor(result, cv2.COLOR_LAB2BGR)
-
-
-def _detect_face_mask(bgr):
-    import cv2
-
-    try:
-        import mediapipe as mp
-        mesh = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=True, max_num_faces=5, min_detection_confidence=0.3
-        )
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        h, w = rgb.shape[:2]
-        results = mesh.process(rgb)
-        if results.multi_face_landmarks:
-            mask = np.zeros((h, w), dtype=np.uint8)
-            for face_lms in results.multi_face_landmarks:
-                points = []
-                for idx in [10, 338, 297, 332, 284, 251, 389, 356, 454, 323,
-                            361, 288, 397, 365, 379, 378, 400, 377, 152, 148,
-                            176, 149, 150, 136, 172, 58, 132, 93, 234, 127,
-                            162, 21, 54, 103, 67, 109]:
-                    lm = face_lms.landmark[idx]
-                    points.append([int(lm.x * w), int(lm.y * h)])
-                cv2.fillConvexPoly(mask, np.array(points), 255)
-            mask = cv2.GaussianBlur(mask, (21, 21), 0)
-            return mask
-    except Exception as e:
-        logger.warning("MediaPipe face mask failed: %s", e)
-
-    try:
-        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        if not os.path.exists(cascade_path):
-            logger.warning("Haar cascade not found at %s", cascade_path)
-            return None
-        cascade = cv2.CascadeClassifier(cascade_path)
-        if cascade.empty():
-            logger.warning("Haar cascade failed to load")
-            return None
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        faces = cascade.detectMultiScale(gray, 1.05, 3, minSize=(40, 40))
-        if len(faces) > 0:
-            mask = np.zeros(bgr.shape[:2], dtype=np.uint8)
-            for (fx, fy, fw, fh) in faces:
-                cv2.ellipse(
-                    mask,
-                    (fx + fw // 2, fy + fh // 2),
-                    (int(fw * 0.6), int(fh * 0.7)),
-                    0, 0, 360, 255, -1,
-                )
-            mask = cv2.GaussianBlur(mask, (21, 21), 0)
-            return mask
-    except Exception as e:
-        logger.warning("Haar cascade failed: %s", e)
-
-    return None
-
-
-def _remove_blemishes(img, skin_mask):
-    import cv2
-    if skin_mask is None or cv2.countNonZero(skin_mask) == 0:
-        return img
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blurred_large = cv2.GaussianBlur(gray.astype(np.float32), (31, 31), 0)
-    diff = blurred_large - gray.astype(np.float32)
-    dark_spots = (diff > 6).astype(np.uint8) * 255
-    dark_spots = cv2.bitwise_and(dark_spots, skin_mask)
-    kernel_small = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    dark_spots = cv2.morphologyEx(dark_spots, cv2.MORPH_OPEN, kernel_small)
-    dark_spots = cv2.morphologyEx(dark_spots, cv2.MORPH_CLOSE, kernel_small)
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark_spots, connectivity=8)
-    count = 0
-    for i in range(1, num_labels):
-        area = stats[i, cv2.CC_STAT_AREA]
-        if area < 3 or area > 500:
-            continue
-        x = stats[i, cv2.CC_STAT_LEFT]
-        y = stats[i, cv2.CC_STAT_TOP]
-        w_cc = stats[i, cv2.CC_STAT_WIDTH]
-        h_cc = stats[i, cv2.CC_STAT_HEIGHT]
-        pad = max(w_cc, h_cc) // 2 + 4
-        y1 = max(0, y - pad)
-        y2 = min(img.shape[0], y + h_cc + pad)
-        x1 = max(0, x - pad)
-        x2 = min(img.shape[1], x + w_cc + pad)
-        roi = img[y1:y2, x1:x2]
-        if roi.size == 0:
-            continue
-        roi_blur = cv2.GaussianBlur(roi, (9, 9), 0)
-        comp_mask = (labels[y1:y2, x1:x2] == i).astype(np.float32)
-        comp_mask = cv2.GaussianBlur(comp_mask, (9, 9), 0)[:, :, np.newaxis]
-        img[y1:y2, x1:x2] = np.clip(
-            roi.astype(np.float32) * (1 - comp_mask) + roi_blur.astype(np.float32) * comp_mask,
-            0, 255
-        ).astype(np.uint8)
-        count += 1
-    logger.info("إزالة الحبوب: %d منطقة", count)
-    return img
-
-
-def _smooth_skin(img, mask, strength=0.4):
-    import cv2
-    if mask is None or cv2.countNonZero(mask) == 0:
-        return img
-    smoothed = cv2.bilateralFilter(img, 7, 40, 40)
-    mask_f = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (15, 15), 0)
-    mask_f = np.clip(mask_f * strength, 0, 1)[:, :, np.newaxis]
-    result = img.astype(np.float32) * (1 - mask_f) + smoothed.astype(np.float32) * mask_f
-    return np.clip(result, 0, 255).astype(np.uint8)
-
-
-def _reduce_shadows(img, face_mask):
-    import cv2
-    if face_mask is None or cv2.countNonZero(face_mask) == 0:
-        return img
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    h, w = bgr.shape[:2]
+    lab = _split_luma(bgr)
     l, a, b = cv2.split(lab)
-    l_f = l.astype(np.float32)
-    face_f = cv2.GaussianBlur(face_mask.astype(np.float32), (31, 31), 0) / 255.0
-    local_mean = cv2.GaussianBlur(l_f, (51, 51), 0)
-    shadow_map = np.clip(local_mean - l_f, 0, 255)
-    shadow_mask = np.clip(shadow_map / 30.0, 0, 1.0) * face_f
-    l_lifted = l_f + shadow_mask * 20
-    l_final = np.clip(l_f * (1 - shadow_mask) + l_lifted * shadow_mask, 0, 255)
-    lab = cv2.merge([l_final.astype(np.uint8), a, b])
-    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    l = l.astype(np.float32)
+    a = a.astype(np.float32)
+    b = b.astype(np.float32)
+    lo_src, hi_src = float(l.min()), float(l.max())
 
+    l, a, b = _denoise(l, a, b, max(0.0, float(denoise)))
+    l = _clarity(l, max(0.0, float(sharpen)), max(0.0, float(threshold)))
+    l = _tone(l, float(contrast), lo_src, hi_src)
+    l = _soft_limit(l, lo_src, hi_src)
+    # كبح لون أخير: تعديل الإضاءة أعلاه أعاد تلويث قنوات a/b
+    a, b = _denoise_chroma(a, b, max(0.0, float(denoise)))
 
-def enhance_image(pil_image, fidelity_weight=0.50):
-    import cv2
-
-    _init_models()
-
-    img = np.array(pil_image.convert("RGB"))
-    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-    original_bgr = img_bgr.copy()
-
-    face_mask = _detect_face_mask(img_bgr)
-
-    if _GFPGANER is not None:
-        try:
-            import torch
-            torch.set_num_threads(2)
-            _, _, restored = _GFPGANER.enhance(
-                img_bgr, has_aligned=False, only_center_face=False, paste_back=True
-            )
-            if restored is not None:
-                restored_uint8 = np.clip(restored * 255, 0, 255).astype(np.uint8) if restored.dtype == np.float32 else restored
-                img_bgr = _color_correct(original_bgr, restored_uint8, face_mask)
-                logger.info("GFPGAN face restoration done")
-            else:
-                logger.info("GFPGAN: no face detected, using original")
-        except Exception as e:
-            logger.warning("GFPGAN enhance failed: %s", e)
-
-    if face_mask is not None:
-        skin_mask = face_mask.copy()
-        eye_mask_left = np.zeros_like(skin_mask)
-        eye_mask_right = np.zeros_like(skin_mask)
-        try:
-            import mediapipe as mp
-            mesh = mp.solutions.face_mesh.FaceMesh(
-                static_image_mode=True, max_num_faces=5, min_detection_confidence=0.3
-            )
-            rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-            results = mesh.process(rgb)
-            if results.multi_face_landmarks:
-                h, w = skin_mask.shape
-                for fl in results.multi_face_landmarks:
-                    for idx in [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398,
-                                33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]:
-                        lm = fl.landmark[idx]
-                        px, py = int(lm.x * w), int(lm.y * h)
-                        if idx < 100:
-                            cv2.circle(eye_mask_left, (px, py), 15, 255, -1)
-                        else:
-                            cv2.circle(eye_mask_right, (px, py), 15, 255, -1)
-        except Exception:
-            pass
-        eye_mask = cv2.bitwise_or(eye_mask_left, eye_mask_right)
-        skin_only = cv2.bitwise_and(skin_mask, cv2.bitwise_not(eye_mask))
-
-        img_bgr = _remove_blemishes(img_bgr, skin_only)
-        img_bgr = _reduce_shadows(img_bgr, face_mask)
-        img_bgr = _smooth_skin(img_bgr, skin_only, strength=0.35)
-
-    if _REALESRGANER is not None:
-        try:
-            import torch
-            torch.set_num_threads(2)
-            h, w = img_bgr.shape[:2]
-            max_side = 1200
-            if max(h, w) > max_side:
-                scale = max_side / max(h, w)
-                small = cv2.resize(img_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-            else:
-                small = img_bgr
-
-            output, _ = _REALESRGANER.enhance(small, outscale=1)
-            if output is not None:
-                output_uint8 = np.clip(output * 255, 0, 255).astype(np.uint8) if output.dtype == np.float32 else output
-                output_resized = cv2.resize(output_uint8, (w, h), interpolation=cv2.INTER_LANCZOS4)
-
-                if face_mask is not None:
-                    mask_f = cv2.GaussianBlur(
-                        face_mask.astype(np.float32) / 255.0, (31, 31), 0
-                    )[:, :, np.newaxis]
-                    img_bgr = np.clip(
-                        img_bgr.astype(np.float32) * mask_f
-                        + output_resized.astype(np.float32) * (1 - mask_f),
-                        0, 255,
-                    ).astype(np.uint8)
-                else:
-                    img_bgr = output_resized
-                logger.info("RealESRGAN detail enhancement done")
-        except Exception as e:
-            logger.warning("RealESRGAN enhance failed: %s", e)
-
-    lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
-    l = clahe.apply(l.astype(np.uint8)).astype(np.float32)
-    lab = cv2.merge([l, a, b])
-    img_bgr = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
-
-    img_bgr = _color_correct_full(original_bgr, img_bgr)
-
-    kernel = np.array([[0, -0.3, 0], [-0.3, 2.2, -0.3], [0, -0.3, 0]], dtype=np.float32)
-    img_bgr = cv2.filter2D(img_bgr, -1, kernel)
-
-    result_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    logger.info("التحسين المكتمل")
-    return Image.fromarray(result_rgb)
+    out_lab = cv2.merge([np.clip(l, 0, 255).astype(np.uint8),
+                         np.clip(a, 0, 255).astype(np.uint8),
+                         np.clip(b, 0, 255).astype(np.uint8)])
+    out_bgr = cv2.cvtColor(out_lab, cv2.COLOR_LAB2BGR)
+    logger.info("تحسين: %dx%d denoise=%.2f sharpen=%.2f thr=%.1f contrast=%.2f",
+                w, h, denoise, sharpen, threshold, contrast)
+    return Image.fromarray(cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB))

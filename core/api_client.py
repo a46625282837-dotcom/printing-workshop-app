@@ -86,6 +86,7 @@ def _headers():
 
 _SLEEPY_STATUSES = {404, 502, 503, 504}
 _RETRY_DELAY = 5
+_TIMEOUT = 25
 
 
 def _request(method, path, **kwargs):
@@ -94,7 +95,7 @@ def _request(method, path, **kwargs):
     last_err = None
     for attempt in range(3):
         try:
-            resp = requests.request(method, url, headers=_headers(), timeout=10, **kwargs)
+            resp = requests.request(method, url, headers=_headers(), timeout=_TIMEOUT, **kwargs)
             body = resp.text or ""
             try:
                 payload = resp.json()
@@ -128,6 +129,14 @@ def _request(method, path, **kwargs):
                 continue
             logger.error("Cannot connect to server at %s", _SERVER_URL)
             return None, "لا يمكن الاتصال بالخادم. تأكد من اتصالك بالإنترنت"
+        except requests.Timeout:
+            if attempt < 2:
+                logger.info("Server timed out (read/connect), retrying in %ds (attempt %d/3)...", _RETRY_DELAY, attempt + 1)
+                time.sleep(_RETRY_DELAY)
+                last_err = "الخادم بطيء حالياً. جارٍ إعادة المحاولة..."
+                continue
+            logger.error("Server timed out at %s", _SERVER_URL)
+            return None, "الخادم بطيء أو مزدحم حالياً. حاول بعد قليل"
         except Exception as e:
             logger.error("API request failed: %s", e)
             return None, str(e)

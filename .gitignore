@@ -6,9 +6,14 @@ build/
 dist/
 *.spec
 !WorshaApp.spec
+!WorshaApp_onedir.spec
+!IDPhotoPro.spec
 .vs/
 *.log
 *.pdf
 *.wwk
 test_conversion.py
 app.db
+WorshaApp_v*.zip
+_perf*.py
+fix*.py

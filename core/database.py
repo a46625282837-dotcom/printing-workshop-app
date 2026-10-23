@@ -1,16 +1,16 @@
 import sqlite3
 import json
 import os
-import sys
 import logging
 from datetime import date, datetime
 
+from core.runtime import data_dir
+
 logger = logging.getLogger(__name__)
 
-if getattr(sys, "frozen", False):
-    DATA_DIR = os.path.join(os.path.dirname(sys.executable), "data")
-else:
-    DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+# مجلد البيانات يمرّ من طبقة runtime الموحّدة: بجانب exe في المجمّع دائماً
+# (لا يُمسح عند التحديث)، وجذر المشروع في المصدر.
+DATA_DIR = data_dir()
 DB_PATH = os.path.join(DATA_DIR, "app.db")
 
 BLOB_FIELDS = {"profile_pixmap", "banner_left_pixmap", "banner_right_pixmap"}

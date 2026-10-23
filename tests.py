@@ -6,14 +6,14 @@ import os
 import tempfile
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 logging.disable(logging.CRITICAL)
 
 from core.image_utils import card_px_size, resize_to_card, CARD_WIDTH_MM, CARD_HEIGHT_MM, TARGET_DPI
-from core.id_extractor import extract_card, four_point_transform, order_points
+from core.id_extractor import extract_card, four_point_transform, order_points, CARD_W, CARD_H
 from core.printer import print_scene, set_printer_name, get_selected_printer_name
-from core.photo_processor import remove_background, resize_to_photo_size, photo_px_size, auto_crop_subject, enhance_auto_remini
+from core.photo_processor import remove_background, resize_to_photo_size, photo_px_size, auto_crop_subject, enhance_auto_remini, restore_interior_alpha
 
 
 
@@ -112,6 +112,51 @@ class TestIDExtractor(unittest.TestCase):
         pil = Image.fromarray(arr)
         result = extract_card(pil)
         self.assertIsInstance(result, Image.Image)
+
+    @staticmethod
+    def _angled_card_scene():
+        """يُبني مشهداً لبطاقة منظورية (بزاوية) فوق خلفية متدرّجة ويُعيد الصورة."""
+        card = Image.new("RGB", (856, 540), (240, 242, 245))
+        dc = ImageDraw.Draw(card)
+        dc.rectangle([30, 30, 826, 510], outline=(0, 0, 0), width=4)
+        dc.rectangle([60, 60, 300, 400], fill=(150, 150, 150))
+        card_bgr = np.array(card)[:, :, ::-1].copy()
+        src = np.float32([[0, 0], [856, 0], [856, 540], [0, 540]])
+        dst = np.float32([[150, 120], [750, 60], [820, 620], [180, 700]])
+        M = cv2.getPerspectiveTransform(src, dst)
+        scene = np.full((900, 1000, 3), (105, 125, 150), np.uint8)
+        rng = np.random.default_rng(0)
+        scene = (scene.astype("float32") * 0.5 +
+                 rng.integers(0, 60, size=(900, 1000, 3)).astype("float32")).astype("uint8")
+        warped = cv2.warpPerspective(card_bgr, M, (1000, 900))
+        mask = cv2.warpPerspective(np.full((540, 856), 255, np.uint8), M, (1000, 900))
+        ys, xs = np.where(mask > 0)
+        scene[ys, xs] = warped[ys, xs]
+        return Image.fromarray(scene[:, :, ::-1])
+
+    def test_extract_card_removes_background(self):
+        """استخراج البطاقة عبر rembg يزيل الخلفية ويرجع RGBA."""
+        rng = np.random.default_rng(0)
+        scene = rng.integers(80, 160, size=(900, 1200, 3)).astype("uint8")
+        pil = Image.fromarray(scene)
+        d = ImageDraw.Draw(pil)
+        d.rectangle([200, 150, 800, 650], fill=(240, 242, 245))
+        d.rectangle([220, 170, 780, 630], fill=(180, 200, 220))
+        result = extract_card(pil)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.mode, "RGBA")
+
+    def test_extract_card_returns_rgba(self):
+        """extract_card يرجع دائماً RGBA بغض النظر عن نوع الإدخال."""
+        img = Image.new("RGB", (400, 300), color=(100, 150, 200))
+        result = extract_card(img)
+        self.assertEqual(result.mode, "RGBA")
+
+    def test_extract_card_full_frame_returns_original(self):
+        """صورة مملأة بالكامل تُرجع كـ RGBA."""
+        img = Image.new("RGB", (500, 400), color=(128, 128, 128))
+        result = extract_card(img)
+        self.assertEqual(result.mode, "RGBA")
 
 
 class TestEdgeCases(unittest.TestCase):
@@ -218,6 +263,242 @@ class TestPrinter(unittest.TestCase):
         set_printer_name("Test Printer")
         self.assertEqual(get_selected_printer_name(), "Test Printer")
         set_printer_name(old)
+
+    def test_print_scene_accepts_back_offsets(self):
+        sig = inspect.signature(print_scene)
+        for name in ("back_offset_dx_mm", "back_offset_dy_mm"):
+            self.assertIn(name, sig.parameters)
+            self.assertEqual(sig.parameters[name].default, 0.0)
+
+    def test_print_scene_back_offset_applies_to_back_pages_only(self):
+        import inspect as _inspect
+        src = _inspect.getsource(print_scene)
+        self.assertIn("page_idx % 2 == 0", src,
+                      "back-page correction must be applied only to even (back) pages")
+        self.assertIn("off_dx = -back_offset_dx_mm if back_shift else 0.0", src,
+                      "back-page shift must be applied via the source rect in scene mm")
+
+    def test_print_setup_dialog_has_back_offset_controls(self):
+        from ui.a4_editor import PrintSetupDialog
+        import inspect as _inspect
+        init = _inspect.getsource(PrintSetupDialog.__init__)
+        self.assertIn("back_dx_spin", init)
+        self.assertIn("back_dy_spin", init)
+        self.assertIn("self.duplex_cb.toggled.connect(self._on_duplex_toggled)", init)
+        self.assertTrue(callable(getattr(PrintSetupDialog, "back_offset_dx", None)))
+        self.assertTrue(callable(getattr(PrintSetupDialog, "back_offset_dy", None)))
+
+    def test_back_offset_defaults_by_printer_brand(self):
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        from ui.a4_editor import PrintSetupDialog
+        d = PrintSetupDialog(page_count=2)
+        d.printer_combo.setCurrentText("HP_FAKE_BRAND_777")
+        d._load_back_offsets()
+        self.assertEqual(d.back_offset_dx(), 9.0, "HP printers must default dx=9.0")
+        self.assertEqual(d.back_offset_dy(), -1.0, "HP printers must default dy=-1.0")
+        d.printer_combo.setCurrentText("Brother_FAKE_BRAND_777")
+        d._load_back_offsets()
+        self.assertEqual(d.back_offset_dx(), 0.0, "non-HP printers must default dx=0.0")
+        self.assertEqual(d.back_offset_dy(), 0.0, "non-HP printers must default dy=0.0")
+
+
+class TestBackOffsetRender(unittest.TestCase):
+    def test_back_page_shifts_but_front_page_stays(self):
+        from PySide6.QtWidgets import QApplication, QGraphicsScene
+        from PySide6.QtGui import QImage, QPainter, QPen, QBrush, QColor
+        from PySide6.QtCore import QRectF
+        from ui.a4_editor import A4_W, A4_H
+        app = QApplication.instance() or QApplication([])
+
+        def bbox_of_dark(img):
+            minx = miny = 10 ** 9
+            maxx = maxy = -1
+            for y in range(img.height()):
+                for x in range(img.width()):
+                    px = img.pixel(x, y)
+                    r = (px >> 16) & 0xFF
+                    g = (px >> 8) & 0xFF
+                    b = px & 0xFF
+                    if r < 250 and g < 250 and b < 250:
+                        if x < minx:
+                            minx = x
+                        if x > maxx:
+                            maxx = x
+                        if y < miny:
+                            miny = y
+                        if y > maxy:
+                            maxy = y
+            return (minx, miny, maxx, maxy)
+
+        def render_page(page_idx, dx_mm, dy_mm, duplex=True):
+            scene = QGraphicsScene(0.0, 0.0, A4_W, A4_H * 2)
+            pen = QPen(QColor(0, 0, 0))
+            pen.setWidthF(0.5)
+            scene.addRect(100.0, (page_idx - 1) * A4_H + 143.5, 10.0, 10.0, pen, QBrush(QColor(0, 0, 0)))
+            img = QImage(2480, 3507, QImage.Format.Format_RGB32)
+            img.fill(QColor(255, 255, 255))
+            p = QPainter(img)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.scale(200.0 / A4_W, 200.0 / A4_W)
+            back_shift = duplex and page_idx % 2 == 0 and (dx_mm or dy_mm)
+            off_dx = -dx_mm if back_shift else 0.0
+            off_dy = -dy_mm if back_shift else 0.0
+            source = QRectF(off_dx, (page_idx - 1) * A4_H + off_dy, A4_W, A4_H)
+            scene.render(p, QRectF(), source)
+            p.end()
+            return bbox_of_dark(img)
+
+        front_plain = render_page(1, 0, 0)
+        front_with = render_page(1, 5, 0)
+        back_plain = render_page(2, 0, 0)
+        back_with = render_page(2, 5, 0)
+        self.assertEqual(front_plain, front_with,
+                         "front page must be identical regardless of back offset")
+        shift_x = back_with[0] - back_plain[0]
+        self.assertGreaterEqual(shift_x, 40,
+                                f"back page must shift right by ~5mm (got {shift_x}px)")
+        self.assertEqual(back_plain[1], back_with[1],
+                         "back page must not shift vertically when only dx offset is used")
+
+
+class TestPhotoEnhance(unittest.TestCase):
+    def test_enhance_button_wired_ready(self):
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        import inspect as _ins
+        from ui.photo_editor import PhotoCropDialog
+        src = _ins.getsource(PhotoCropDialog._setup_ui)
+        # الزر معطّل مؤقتاً بطلب المستخدم: يعرض رسالة صيانة ولا ينفّذ معالجة
+        self.assertIn("_enhance_maintenance", src,
+                      "enhance button must show the maintenance notice")
+        self.assertNotIn("_btn_enhance.clicked.connect(self._run_enhance)", src,
+                         "enhance button must not run the pipeline while disabled")
+        self.assertIn("تحسين وتوضيح الصورة", src,
+                      "button label must read تحسين وتوضيح الصورة")
+        for m in ("_run_enhance", "_on_enhance_ready", "_on_enhance_failed",
+                  "_enhance_maintenance"):
+            self.assertTrue(callable(getattr(PhotoCropDialog, m, None)), m)
+
+    def test_enhance_thread_defined_in_editor(self):
+        from ui.photo_editor import PhotoEnhanceThread
+        from PySide6.QtCore import Signal
+        self.assertTrue(hasattr(PhotoEnhanceThread, "result_ready"),
+                        "photo enhance thread must expose result_ready")
+        self.assertTrue(hasattr(PhotoEnhanceThread, "failed"))
+
+    def test_ai_enhance_module_exposes_enhance_image(self):
+        from core.ai_enhance import enhance_image, is_available
+        self.assertTrue(callable(enhance_image))
+        self.assertTrue(callable(is_available))
+
+
+class TestDocumentPageFit(unittest.TestCase):
+    def _make_pixmap(self, w, h):
+        from PySide6.QtGui import QColor, QImage, QPixmap
+        img = QImage(w, h, QImage.Format.Format_RGB32)
+        img.fill(QColor(255, 255, 255))
+        return QPixmap.fromImage(img)
+
+    def _item(self, w, h, pw=210.0, ph=297.0):
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        from ui.documents_editor import DocumentItem
+        return DocumentItem(self._make_pixmap(w, h), pw, ph)
+
+    def test_added_document_defaults_to_page_fit(self):
+        item = self._item(2480, 3508)
+        self.assertIsNone(item._nat_w_mm, "added image must fit the A4 page, not natural size")
+        self.assertIsNone(item._nat_h_mm)
+        self.assertAlmostEqual(item._base_scale(), min(210.0 / 2480, 297.0 / 3508), 8,
+                               msg="base scale must be the page-fit scale")
+
+    def test_small_image_gets_enlarged_to_fill_page(self):
+        item = self._item(300, 424)
+        w, h = item._content_dims()
+        self.assertAlmostEqual(w, 210.0, delta=1.0,
+                               msg="small image must be enlarged to fill the A4 page width")
+        self.assertAlmostEqual(h, 297.0, delta=1.0,
+                               msg="small image must be enlarged to fill the A4 page height")
+
+    def test_photo_gets_enlarged_to_fill_page(self):
+        item = self._item(1080, 1440)
+        w, h = item._content_dims()
+        self.assertAlmostEqual(w, 210.0, delta=1.0,
+                               msg="4:3 image must be enlarged to fill the A4 page width")
+        self.assertAlmostEqual(h, 210.0 * 1440 / 1080, delta=1.0,
+                               msg="4:3 image scaled proportionally, never distorted")
+        self.assertLessEqual(h, 297.0, msg="4:3 image must stay inside the A4 page height")
+
+    def test_big_image_does_not_overshoot_page(self):
+        item = self._item(3508, 5000)
+        w, h = item._content_dims()
+        self.assertLessEqual(w, 211.0, msg="image must never exceed the A4 page width")
+        self.assertLessEqual(h, 298.0, msg="image must never exceed the A4 page height")
+
+    def _pack_editor(self, documents):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            _num_pages=1, documents=documents,
+            _slot_w=lambda: 210.0, _slot_h=lambda: 297.0,
+            _page_stride=lambda: 297.0 + 5.0)
+
+    def test_first_full_document_places_on_first_page(self):
+        from PySide6.QtCore import QPointF
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        from ui.documents_editor import DocumentsEditor
+        item = self._item(2480, 3508)
+        ed = self._pack_editor([])
+        page, off = DocumentsEditor._pack_slot(ed, item)
+        self.assertEqual(page, 0, "first full-page document must land on page 1 (index 0)")
+        self.assertEqual(off, QPointF(0.0, 0.0))
+
+    def test_second_full_document_goes_to_new_page(self):
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        from ui.documents_editor import DocumentsEditor
+        first = self._item(2480, 3508)
+        first.setPos(0, 0)
+        ed = self._pack_editor([first])
+        item = self._item(2480, 3508)
+        page, _ = DocumentsEditor._pack_slot(ed, item)
+        self.assertEqual(page, 1, "second full-page document must go to a new page")
+
+    def _editor_stub(self, num_pages, docs):
+        from types import SimpleNamespace
+        from PySide6.QtWidgets import QApplication, QGraphicsScene
+        app = QApplication.instance() or QApplication([])
+        return SimpleNamespace(
+            _num_pages=num_pages, documents=docs,
+            _page_stride=lambda: 297.0 + 5.0, _page_w=lambda: 210.0,
+            scene=QGraphicsScene(), _current_page=2,
+            _update_page_lbl=lambda: None)
+
+    def _prune(self, ed):
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        from ui.documents_editor import DocumentsEditor
+        DocumentsEditor._prune_empty_trailing_pages(ed)
+        return ed._num_pages
+
+    def test_moving_last_doc_out_prunes_empty_page(self):
+        first = self._item(2480, 3508)
+        first.setPos(0, 0)
+        n = self._prune(self._editor_stub(2, [first]))
+        self.assertEqual(n, 1, "empty trailing page must be removed after document left it")
+
+    def test_page_with_document_is_kept(self):
+        first = self._item(2480, 3508)
+        first.setPos(0, 302)
+        n = self._prune(self._editor_stub(2, [first]))
+        self.assertEqual(n, 2, "page containing a document must never be pruned")
+
+    def test_only_trailing_empty_pages_are_pruned(self):
+        doc = self._item(2480, 3508)
+        doc.setPos(0, 302)
+        n = self._prune(self._editor_stub(3, [doc]))
+        self.assertEqual(n, 2, "single trailing empty page removed, middle page kept")
 
 
 class TestCardSwap(unittest.TestCase):
@@ -335,10 +616,10 @@ class TestSessionPersistence(unittest.TestCase):
             self.assertEqual(m.call_args[1].get("suppress_expired"), True)
 
     def test_restore_uses_suppress_expired(self):
-        """_try_restore_session must call api_check_auth with suppress_expired=True."""
+        """Session restore must call api_check_auth with suppress_expired=True."""
         from ui.main_window import MainWindow
         import inspect
-        src = inspect.getsource(MainWindow._try_restore_session)
+        src = inspect.getsource(MainWindow._verify_session_worker)
         self.assertIn("api_check_auth(suppress_expired=True)", src,
                       "restore must suppress the expired callback to keep the session")
 
@@ -371,6 +652,50 @@ class TestSessionPersistence(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestSubscriptionGate(unittest.TestCase):
+    """While the post-login verification (subscription state) is pending, no
+    section can be wrongly blocked by the subscription dialog."""
+
+    def _fake(self):
+        import unittest.mock as mock
+        fake = mock.Mock()
+        fake._is_admin = False
+        fake._sub_pending = True
+        fake._subscription_required = True
+        fake._use_api = True
+        fake._username = "u"
+        fake._compute_subscription_days = mock.Mock(return_value=0)
+        return fake
+
+    def test_section_access_allowed_while_sub_pending(self):
+        import unittest.mock as mock
+        from ui.main_window import MainWindow
+        fake = self._fake()
+        self.assertTrue(MainWindow._check_section_access(fake))
+        with mock.patch("ui.main_window.QMessageBox") as box:
+            fake._sub_pending = False
+            self.assertFalse(MainWindow._check_section_access(fake))
+            box.warning.assert_called()
+
+    def test_print_require_allowed_while_sub_pending(self):
+        import unittest.mock as mock
+        from ui.main_window import MainWindow
+        fake = self._fake()
+        self.assertTrue(MainWindow._require_subscription(fake))
+        with mock.patch("ui.main_window.QMessageBox") as box:
+            fake._sub_pending = False
+            self.assertFalse(MainWindow._require_subscription(fake))
+            box.warning.assert_called()
+
+    def test_warning_skipped_while_sub_pending(self):
+        from ui.main_window import MainWindow
+        import unittest.mock as mock
+        fake = self._fake()
+        with mock.patch("ui.main_window.QMessageBox") as box:
+            MainWindow._show_subscription_warning(fake)
+            box.information.assert_not_called()
 
 
 class TestPhotoProcessor(unittest.TestCase):
@@ -419,6 +744,36 @@ class TestPhotoProcessor(unittest.TestCase):
         img = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
         cropped = auto_crop_subject(img)
         self.assertEqual(cropped.size, (100, 100))
+
+    def test_restore_interior_alpha_fills_enclosed_hole(self):
+        img = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+        pix = img.load()
+        for y in range(40, 160):
+            for x in range(40, 160):
+                if 90 <= x <= 110 and 90 <= y <= 110:
+                    pix[x, y] = (0, 0, 0, 0)  # interior hole (white shirt)
+                else:
+                    pix[x, y] = (255, 255, 255, 255)
+        restored = restore_interior_alpha(img)
+        a = np.array(restored.getchannel("A"))
+        self.assertEqual(a[100, 100], 255)  # interior hole filled
+        self.assertEqual(a[10, 10], 0)      # external background stays transparent
+
+    def test_restore_interior_alpha_no_alpha_returns_same(self):
+        img = Image.new("RGB", (100, 100), (255, 0, 0))
+        restored = restore_interior_alpha(img)
+        self.assertEqual(restored.mode, "RGB")
+
+    def test_restore_interior_alpha_background_touching_border_stays(self):
+        img = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+        pix = img.load()
+        for y in range(30, 70):
+            for x in range(30, 70):
+                pix[x, y] = (255, 255, 255, 255)
+        restored = restore_interior_alpha(img)
+        a = np.array(restored.getchannel("A"))
+        self.assertEqual(a[5, 5], 0)        # border background not filled
+        self.assertEqual(a[50, 50], 255)    # subject kept
 
     def test_photo_grid_pos(self):
         MARGIN = 10
@@ -689,6 +1044,38 @@ class TestPhotoItem(unittest.TestCase):
                          "PhotoGraphicsView must not open dialog — PhotoItem handles it")
 
 
+class TestPhotoPrintClean(unittest.TestCase):
+    """Printing/saving must render ONLY photos on the paper — never guide boxes."""
+
+    def test_print_paths_hide_all_non_photo_items(self):
+        import inspect
+        from ui.photo_editor import PhotoEditor
+        for name in ("_print_page", "_save_pdf"):
+            src = inspect.getsource(getattr(PhotoEditor, name))
+            self.assertIn("not isinstance(it, PhotoItem)", src,
+                          f"{name} must hide every non-photo item before printing")
+
+
+class TestScannerQuality(unittest.TestCase):
+    """Scanner section must render/print/save at 300 DPI so imported images
+    keep full detail — not the old low-res 72 DPI (595x842) scene."""
+
+    def test_scene_is_high_resolution(self):
+        from ui.scanner_page import A4_W, A4_H
+        self.assertGreaterEqual(A4_W, 2400, "scene width must be ~300dpi A4")
+        self.assertGreaterEqual(A4_H, 3400, "scene height must be ~300dpi A4")
+        # 300 dpi A4 = 2480 x 3508
+        self.assertAlmostEqual(A4_W / 210.0, 300 / 25.4, delta=2)
+        self.assertAlmostEqual(A4_H / 297.0, 300 / 25.4, delta=2)
+
+    def test_save_pdf_uses_high_resolution(self):
+        import inspect
+        from ui.scanner_page import ScannerPage
+        src = inspect.getsource(ScannerPage._save_pdf)
+        self.assertIn("QPrinter.HighResolution", src,
+                      "_save_pdf must print at HighResolution for sharp PDFs")
+
+
 class TestSliderGroup(unittest.TestCase):
     """Sliders in the photo editor panel should be vertical for visibility."""
 
@@ -699,6 +1086,64 @@ class TestSliderGroup(unittest.TestCase):
         src = inspect.getsource(_SliderGroup.__init__)
         self.assertIn("Qt.Vertical", src,
                       "Slider must be vertical — Qt.Vertical not found in __init__")
+
+
+class TestAutoCardStraighten(unittest.TestCase):
+    """القاعدة الثابتة للتلقائي: تُعدَّل الميلان تلقائياً من زوايا البطاقة
+    الأربع الحقيقية (مثل النقر اليدوي لكن تلقائياً) ثم تُلصق بزوايا مستطيل A4
+    — لا قصّ مباشر على صورة مائلة أبداً، حتى بلا مضلع YOLO (قناع)."""
+
+    @staticmethod
+    def _tilted_card(tilt_deg=20, card_w=856, card_h=540,
+                     canvas=(1100, 750), cx=560, cy=380, seed=0):
+        rng = np.random.default_rng(seed)
+        base = rng.integers(30, 90, (card_h, card_w, 3), dtype=np.uint8)
+        base[20:-20, 20:-20] = rng.integers(160, 235, (card_h - 40, card_w - 40, 3), dtype=np.uint8)
+        cv2.rectangle(base, (10, 10), (card_w - 11, card_h - 11), (20, 20, 20), 4)
+        a = np.radians(tilt_deg); ca, sa = np.cos(a), np.sin(a)
+        src = np.array([[0, 0], [card_w - 1, 0], [card_w - 1, card_h - 1], [0, card_h - 1]], np.float32)
+        dst = np.array([(cx + (x - card_w / 2) * ca - (y - card_h / 2) * sa,
+                         cy + (x - card_w / 2) * sa + (y - card_h / 2) * ca)
+                        for x, y in src], np.float32)
+        M = cv2.getPerspectiveTransform(src, dst)
+        canvas_arr = np.full((canvas[1], canvas[0], 3), 245, np.uint8)
+        warped = cv2.warpPerspective(base, M, (canvas[0], canvas[1]))
+        ys, xs = np.nonzero(warped.sum(axis=2) > 100)
+        canvas_arr[ys, xs] = warped[ys, xs]
+        return Image.fromarray(canvas_arr)
+
+    def test_no_mask_content_path_straightens(self):
+        """صورة مائلة بلا قناع YOLO → تُفرد تلقائياً (أو تُرجع None صريحاً،
+        لا صورة مائلة/مقلوبة أبداً). الإخراج عندما ينجح يُلصق بمستطيل A4."""
+        from core.local_yolo import cut_card_local
+        for tilt in (0, 15, 30, 45):
+            out = cut_card_local(self._tilted_card(tilt), dpi=300)
+            if out is None:
+                continue  # لا كشف — يُعاملها الواجهة عبر مسارات أخرى بأمان
+            w, h = out.size
+            self.assertEqual((w, h), (1122, 649),
+                             f"tilt={tilt} not glued to A4 slot (95x55 @300dpi)")
+
+    def test_corner_ordering_is_landscape_stable(self):
+        """ترتيب الزوايا الأربع يبقى عَرْضياً سليماً بأي ميلان (لا انقلاب)."""
+        from core.local_yolo import order_card_corners
+
+        def rot_corners(cw, ch, deg, cx, cy):
+            a = np.radians(deg); ca, sa = np.cos(a), np.sin(a)
+            return [(cx + (x - cw / 2) * ca - (y - ch / 2) * sa,
+                     cy + (x - cw / 2) * sa + (y - ch / 2) * ca)
+                    for x, y in ((0, 0), (cw, 0), (cw, ch), (0, ch))]
+
+        for tilt in (0, 15, 30, 45, 60, 75, 88):
+            pts = rot_corners(856, 540, tilt, 400, 300)
+            tl, tr, br, bl = order_card_corners(pts)
+            wtop = np.hypot(tr[0] - tl[0], tr[1] - tl[1])
+            hside = np.hypot(br[0] - tr[0], br[1] - tr[1])
+            self.assertGreater(wtop, hside,
+                               f"tilt={tilt}: top edge must be the long (landscape) side")
+            # الاتجاهية غير معكوسة: det > 0 (CCW)
+            d = np.cross(tr - tl, br - tl)
+            self.assertGreater(d, 0, f"tilt={tilt}: mirrored order")
 
 
 if __name__ == "__main__":

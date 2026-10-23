@@ -3,7 +3,6 @@ import io
 import json
 import logging
 import os
-import sys
 import time
 
 import requests
@@ -22,9 +21,8 @@ class AiTryonError(Exception):
 
 
 def _data_dir():
-    if getattr(sys, "frozen", False):
-        return os.path.join(getattr(sys, "_MEIPASS", os.path.dirname(sys.executable)), "data")
-    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+    from core.runtime import data_dir as _runtime_data_dir
+    return _runtime_data_dir()
 
 
 def _config_path():

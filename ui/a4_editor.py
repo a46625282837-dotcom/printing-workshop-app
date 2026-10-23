@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 
 
 
@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QVBoxLayout,
 
 
 
-                                QInputDialog, QMenu, QScrollArea)
+                               QGraphicsProxyWidget, QInputDialog, QMenu, QScrollArea, QLineEdit, QSlider, QDoubleSpinBox)
 
 
 
@@ -38,7 +38,7 @@ from PySide6.QtCore import Qt, Signal, QSettings, QThread, QTimer, QRectF
 
 
 
-from PySide6.QtGui import QPixmap, QPen, QColor, QBrush, QPainter, QShortcut, QKeySequence, QTransform
+from PySide6.QtGui import QPixmap, QPen, QColor, QBrush, QPainter, QShortcut, QKeySequence, QTransform, QImage
 
 
 
@@ -53,9 +53,10 @@ from PySide6.QtPrintSupport import QPrinter, QPrinterInfo
 from PIL import Image
 
 import numpy as np
-import cv2
 
-from core.printer import print_scene, get_selected_printer_name, set_printer_name, PAPER_TYPES, PAPER_TYPE_NAMES, get_last_paper_type, set_last_paper_type, NO_PRINT_KEY
+from ui import theme
+
+from core.printer import print_scene, get_selected_printer_name, set_printer_name, PAPER_TYPES, PAPER_TYPE_NAMES, get_last_paper_type, set_last_paper_type, NO_PRINT_KEY, show_printer_properties
 
 
 
@@ -68,6 +69,24 @@ from ui.id_card_item import IDCardItem, CARD_W, CARD_H
 
 
 logger = logging.getLogger(__name__)
+
+
+def _adjust_brightness_pixmap(pix: QPixmap, value: int) -> QPixmap:
+    """ضبط سطوع QPixmap: value من -100 (تعتيم) إلى +100 (إضاءة).
+
+    ضرب موحّد لعناصر RGB يحفظ الألوان في الاتجاهين: عند تقليل الإضاءة
+    فقط تقل السطوع دون أن تتحول الصورة إلى أسود/أبيض.
+    """
+    if value == 0 or pix is None or pix.isNull():
+        return pix
+    img = pix.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
+    w, h = img.width(), img.height()
+    arr = np.frombuffer(bytes(img.bits()), dtype=np.uint8).reshape(h, w, 4).copy()
+    factor = 1.0 + (value / 100.0) * 0.6
+    rgb = arr[:, :, :3].astype(np.float32) * factor
+    arr[:, :, :3] = np.clip(rgb, 0, 255).astype(np.uint8)
+    out_img = QImage(arr.data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
+    return QPixmap.fromImage(out_img)
 
 
 
@@ -150,7 +169,16 @@ class A4GraphicsView(QGraphicsView):
 
 
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
+        self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
+        self.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        theme.on_change(self._apply_canvas_bg)
+        self._apply_canvas_bg()
+
+
+
+
+    def _apply_canvas_bg(self, mode=None):
+        self.setBackgroundBrush(QColor(theme.canvas_color()))
 
 
 
@@ -410,6 +438,18 @@ class PrintSetupDialog(QDialog):
 
 
 
+        self.printer_combo.setEditable(True)
+
+
+
+        self.printer_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+
+
+
+        self.printer_combo.setToolTip("اختر طابعة من القائمة أو اكتب اسم الطابعة مباشرة")
+
+
+
         for p in QPrinterInfo.availablePrinters():
 
 
@@ -440,7 +480,17 @@ class PrintSetupDialog(QDialog):
 
         printer_row.addWidget(self.printer_combo)
 
-
+        self.printer_props_btn = QPushButton("⚙ خصائص الطابعة")
+        self.printer_props_btn.setToolTip("اختيار نوع الورق الفعلي الذي تطبعه الطابعة، جودة الطباعة، وبقية خصائص الطابعة")
+        self.printer_props_btn.setStyleSheet("""
+            QPushButton {
+                background: #5a5a5a; color: white; font-size: 12px; font-weight: bold;
+                padding: 6px 12px; border-radius: 5px; border: none;
+            }
+            QPushButton:hover { background: #e67e22; }
+        """)
+        self.printer_props_btn.clicked.connect(self._open_printer_properties)
+        printer_row.addWidget(self.printer_props_btn)
 
         layout.addLayout(printer_row)
 
@@ -509,6 +559,33 @@ class PrintSetupDialog(QDialog):
 
 
         layout.addWidget(self.duplex_cb)
+
+        self.back_off_lbl = QLabel("معايرة الوجه الخلفي (للطباعة على وجهين فقط، اتركه صفر):")
+        layout.addWidget(self.back_off_lbl)
+        back_dx_row = QHBoxLayout()
+        back_dx_row.addWidget(QLabel("إزاحة الظهر أفقياً (مم):"))
+        self.back_dx_spin = QDoubleSpinBox()
+        self.back_dx_spin.setRange(-10.0, 10.0)
+        self.back_dx_spin.setDecimals(1)
+        self.back_dx_spin.setSingleStep(0.1)
+        self.back_dx_spin.setValue(0.0)
+        back_dx_row.addWidget(self.back_dx_spin)
+        back_dx_row.addStretch(1)
+        layout.addLayout(back_dx_row)
+        back_dy_row = QHBoxLayout()
+        back_dy_row.addWidget(QLabel("إزاحة الظهر عمودياً (مم):"))
+        self.back_dy_spin = QDoubleSpinBox()
+        self.back_dy_spin.setRange(-10.0, 10.0)
+        self.back_dy_spin.setDecimals(1)
+        self.back_dy_spin.setSingleStep(0.1)
+        self.back_dy_spin.setValue(0.0)
+        back_dy_row.addWidget(self.back_dy_spin)
+        back_dy_row.addStretch(1)
+        layout.addLayout(back_dy_row)
+
+        self.duplex_cb.toggled.connect(self._on_duplex_toggled)
+        self.printer_combo.currentTextChanged.connect(self._load_back_offsets)
+        self._load_back_offsets()
 
 
 
@@ -624,6 +701,17 @@ class PrintSetupDialog(QDialog):
 
 
 
+    def _open_printer_properties(self):
+        printer_name = self.printer_combo.currentText().strip()
+        if not printer_name:
+            QMessageBox.information(self, "تنبيه", "اكتب أو اختر اسم الطابعة أولاً.")
+            return
+        logger.info("فتح خصائص الطابعة: %r", printer_name)
+        ok, why = show_printer_properties(self, printer_name)
+        if not ok:
+            QMessageBox.warning(self, "تنبيه",
+                                f"تعذر فتح خصائص الطابعة '{printer_name}'.\n{why or ''}")
+
     def _on_all_pages_toggled(self, checked):
 
 
@@ -670,6 +758,41 @@ class PrintSetupDialog(QDialog):
 
         return self.duplex_cb.isChecked()
 
+    def _on_duplex_toggled(self, checked):
+        self.back_off_lbl.setEnabled(checked)
+        self.back_dx_spin.setEnabled(checked)
+        self.back_dy_spin.setEnabled(checked)
+
+    def _load_back_offsets(self):
+        settings = QSettings("ورقة طباعة", "A4Editor")
+        pname = self.printer_combo.currentText().strip()
+        def_dx, def_dy = 0.0, 0.0
+        if pname and "hp" in pname.lower():
+            def_dx, def_dy = 9.0, -1.0
+        if not pname:
+            self.back_dx_spin.setValue(0.0)
+            self.back_dy_spin.setValue(0.0)
+        else:
+            self.back_dx_spin.setValue(
+                settings.value(f"duplexOffset/{pname}/dx", def_dx, type=float))
+            self.back_dy_spin.setValue(
+                settings.value(f"duplexOffset/{pname}/dy", def_dy, type=float))
+        self._on_duplex_toggled(self.duplex_cb.isChecked())
+
+    def back_offset_dx(self):
+        return self.back_dx_spin.value()
+
+    def back_offset_dy(self):
+        return self.back_dy_spin.value()
+
+    def accept(self):
+        settings = QSettings("ورقة طباعة", "A4Editor")
+        pname = self.printer_combo.currentText().strip()
+        if pname:
+            settings.setValue(f"duplexOffset/{pname}/dx", self.back_dx_spin.value())
+            settings.setValue(f"duplexOffset/{pname}/dy", self.back_dy_spin.value())
+        super().accept()
+
 
 
 
@@ -702,7 +825,7 @@ class CardProcessingThread(QThread):
 
 
 
-    card_ready = Signal(bytes)
+    card_ready = Signal(bytes, object)
 
     original_ready = Signal(bytes)
 
@@ -754,43 +877,16 @@ class CardProcessingThread(QThread):
 
 
 
-
-
             def process_one(item):
+                from core.ai_agent import ai_cut_card
 
-
-
-                import numpy as np
-
-
-
-                from core.id_extractor import extract_card
-
-
-
-                from core.image_utils import resize_to_card
-
-
-
-                from core.photo_processor import auto_crop_subject
-
-
+                name = item if isinstance(item, str) else "clipboard-%d" % (len(self._items))
 
                 if isinstance(item, str):
-
-
-
                     pil = Image.open(item)
-
-
-
+                    name = os.path.basename(item)
                 else:
-
-
-
                     pil = Image.open(io.BytesIO(item))
-
-
 
                 orig_buf = io.BytesIO()
                 try:
@@ -799,89 +895,23 @@ class CardProcessingThread(QThread):
                 except Exception:
                     original_bytes = b""
 
-
-
                 if self._no_crop:
-
-
-
-                    pil = pil.convert("RGB")
-
-
-
-                    extracted = pil
-
-
-
-                elif pil.mode == "RGBA":
-
-
-
-                    alpha = np.array(pil.split()[-1])
-
-
-
-                    transparent_ratio = np.sum(alpha < 128) / alpha.size
-
-
-
-                    if transparent_ratio > 0.05:
-
-
-
-                        pil = pil.convert("RGB")
-
-
-
-                        extracted = pil
-
-
-
-                    else:
-
-
-
-                        pil = pil.convert("RGB")
-
-
-
-                        extracted = extract_card(pil)
-
-
-
-                        extracted = auto_crop_subject(extracted)
-
-
-
+                    result = pil.convert("RGB")
+                    corners = [(0.0, 0.0), (result.width - 1, 0.0),
+                               (result.width - 1, result.height - 1),
+                               (0.0, result.height - 1)]
                 else:
+                    corners = []
+                    result = ai_cut_card(pil, image_name=name, corners_out=corners)
 
-
-
-                    pil = pil.convert("RGB")
-
-
-
-                    extracted = extract_card(pil)
-
-
-
-                    extracted = auto_crop_subject(extracted)
-
-
-
-                resized = resize_to_card(extracted)
-
-
+                if result is None:
+                    # الوكيل فشل — لا نقصّ بالطريقة التقليدية أبداً، لا تُوضع البطاقة.
+                    return None, original_bytes, []
 
                 buf = io.BytesIO()
+                result.save(buf, format="PNG")
 
-
-
-                resized.save(buf, format="PNG")
-
-
-
-                return buf.getvalue(), original_bytes
+                return buf.getvalue(), original_bytes, corners
 
 
 
@@ -961,7 +991,7 @@ class CardProcessingThread(QThread):
 
 
 
-                            self.card_ready.emit(val[0])
+                            self.card_ready.emit(val[0], val[2])
                             self.original_ready.emit(val[1])
 
 
@@ -1343,11 +1373,28 @@ class A4Editor(QWidget):
 
 
 
+
+        btn_save_images = QPushButton("🖼️ حفظ الصور")
+
+
+
+
+        btn_save_images.setToolTip("حفظ كل بطاقة مقصوصة صورة منفصلة بجودتها الكاملة")
+
+
+
+
+        btn_save_images.clicked.connect(self.save_images)
+
+
+
         btn_clear = QPushButton("تفريغ الكل")
 
 
 
         btn_clear.clicked.connect(self.clear_all)
+
+        
 
 
 
@@ -1451,6 +1498,11 @@ class A4Editor(QWidget):
 
 
 
+
+        btn_bar.addWidget(btn_save_images)
+
+
+
         btn_bar.addWidget(self.btn_nocrop)
 
 
@@ -1499,6 +1551,10 @@ class A4Editor(QWidget):
 
 
 
+        self.scene.selectionChanged.connect(self._on_selection_changed)
+
+
+
         self._draw_page_area(0)
 
 
@@ -1544,6 +1600,21 @@ class A4Editor(QWidget):
 
 
         self._apply_default_zoom()
+    def showEvent(self, event):
+        super().showEvent(event)
+        if hasattr(self, 'view'):
+            QTimer.singleShot(0, self._scroll_to_page_top)
+
+
+    def _scroll_to_page_top(self):
+        if not hasattr(self, 'view'):
+            return
+        sb_v = self.view.verticalScrollBar()
+        sb_h = self.view.horizontalScrollBar()
+        sb_v.setValue(sb_v.minimum())
+        sb_h.setValue(sb_h.minimum())
+
+
 
 
 
@@ -1561,8 +1632,6 @@ class A4Editor(QWidget):
 
         if hasattr(self, '_spinner') and self.view:
 
-
-
             self._spinner.move(
 
 
@@ -1576,6 +1645,8 @@ class A4Editor(QWidget):
 
 
             )
+
+            self._recenter_status()
 
 
 
@@ -1607,6 +1678,13 @@ class A4Editor(QWidget):
 
 
 
+    def _col_x(self, col):
+        """إحداثي x لعمود معين يملأ عرض الورقة حتى تلتصق الأعمدة الأطراف بالحواف."""
+        if CARDS_PER_ROW <= 1:
+            return MARGIN
+        gap = (A4_W - 2 * MARGIN - CARDS_PER_ROW * CARD_W) / float(CARDS_PER_ROW - 1)
+        return MARGIN + col * (CARD_W + gap)
+
     def _draw_page_area(self, page_index):
 
 
@@ -1625,13 +1703,11 @@ class A4Editor(QWidget):
 
 
 
-        x = MARGIN
-
-
-
         for col in range(CARDS_PER_ROW):
 
 
+
+            cx = self._col_x(col)
 
             y = y0 + MARGIN
 
@@ -1641,16 +1717,12 @@ class A4Editor(QWidget):
 
 
 
-                slot = self.scene.addRect(x, y, CARD_W, CARD_H, pen)
+                slot = self.scene.addRect(cx, y, CARD_W, CARD_H, pen)
                 slot.setData(NO_PRINT_KEY, True)
 
 
 
                 y += CARD_H + ROW_GAP
-
-
-
-            x += CARD_W + COL_GAP
 
 
 
@@ -2102,6 +2174,89 @@ class A4Editor(QWidget):
 
 
 
+    def _open_ai_settings(self):
+        from core.local_yolo import get_local_model_path, set_local_model_path, has_local_model
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("إعدادات القص المحلي (YOLOv8)")
+        dlg.setFixedSize(500, 330)
+        dlg.setLayoutDirection(Qt.RightToLeft)
+        dlg.setStyleSheet("QDialog{background:#f5f5f5;}")
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(10)
+        lay.setContentsMargins(20, 20, 20, 20)
+
+        lbl = QLabel("وكيل القصّ المحلي (YOLOv8) — فائق السرعة، بلا إنترنت")
+        lbl.setStyleSheet("font-size:14px;font-weight:bold;color:#000;")
+        lay.addWidget(lbl)
+
+        info = QLabel("يعمل التطبيق بنموذج YOLO المدرَّب المحلي (models/card_detector.onnx) "
+                      "ويقصر زوايا الهوية تلقائياً. إن توفر ملف .pt مدرب على هوياتك فسيُستخدم "
+                      "أولاً — وإلا يقع الكشف على نموذج card_detector المضمّن.")
+        info.setWordWrap(True)
+        info.setStyleSheet("font-size:11px;color:#777;")
+        lay.addWidget(info)
+
+        lbl_mp = QLabel("مسار ملف النموذج المحلي (.pt)")
+        lbl_mp.setStyleSheet("font-size:12px;font-weight:bold;color:#000;")
+        lay.addWidget(lbl_mp)
+        txt_mp = QLineEdit()
+        txt_mp.setPlaceholderText("مثال: models/id_card.pt")
+        txt_mp.setText(get_local_model_path())
+        lay.addWidget(txt_mp)
+        mp_status = QLabel()
+        mp_status.setStyleSheet("font-size:11px;color:#777;")
+        mp_status.setAlignment(Qt.AlignCenter)
+        mp_status.setText("✓ النموذج موجود وجاهز" if has_local_model() else "يُستعمل نموذج card_detector المضمّن")
+        lay.addWidget(mp_status)
+
+        btn_row = QHBoxLayout()
+        btn_save = QPushButton("💾 حفظ")
+        btn_save.setStyleSheet(
+            "QPushButton{background:#0078d4;color:white;font-size:13px;font-weight:bold;border:none;border-radius:6px;padding:0 20px}"
+            "QPushButton:hover{background:#005fa3}")
+        btn_log = QPushButton("📜 عرض السجل")
+        btn_log.setStyleSheet(
+            "QPushButton{background:#ff9800;color:white;font-size:13px;font-weight:bold;border:none;border-radius:6px;padding:0 20px}"
+            "QPushButton:hover{background:#e68900}")
+        btn_close = QPushButton("إغلاق")
+        btn_close.clicked.connect(dlg.accept)
+
+        def on_save():
+            set_local_model_path(txt_mp.text())
+            status.setText("✓ تم حفظ مسار النموذج المحلي")
+
+        def on_log():
+            from core.ai_agent import get_crop_log
+            log_dlg = QDialog(dlg)
+            log_dlg.setWindowTitle("سجلّ القصّ")
+            log_dlg.resize(620, 420)
+            log_dlg.setLayoutDirection(Qt.RightToLeft)
+            lay2 = QVBoxLayout(log_dlg)
+            tx = QTextEdit()
+            tx.setReadOnly(True)
+            tx.setStyleSheet("font-size:12px;font-family:Consolas,'Courier New';direction:ltr;text-align:left;")
+            tx.setPlainText(get_crop_log())
+            lay2.addWidget(tx)
+            btn_ok = QPushButton("إغلاق")
+            btn_ok.clicked.connect(log_dlg.accept)
+            lay2.addWidget(btn_ok)
+            log_dlg.exec()
+
+        status = QLabel()
+        status.setStyleSheet("font-size:12px;color:#4caf50;font-weight:bold;")
+        status.setAlignment(Qt.AlignCenter)
+        lay.addWidget(status)
+
+        btn_save.clicked.connect(on_save)
+        btn_log.clicked.connect(on_log)
+        btn_row.addWidget(btn_save)
+        btn_row.addWidget(btn_log)
+        btn_row.addWidget(btn_close)
+        lay.addLayout(btn_row)
+
+        dlg.exec()
+
     def _ask_crop_choice(self):
         dlg = QDialog(self)
         dlg.setWindowTitle("اختيار طريقة الإضافة")
@@ -2151,6 +2306,7 @@ class A4Editor(QWidget):
     def _start_card_processing(self, paths, no_crop):
         if not paths:
             return
+        self._no_crop = no_crop
         thread = CardProcessingThread(paths, no_crop)
         thread.card_ready.connect(self._on_card_buffer_ready)
         thread.original_ready.connect(self._on_original_buffer_ready)
@@ -2159,6 +2315,9 @@ class A4Editor(QWidget):
         thread.start()
         self._processing_thread = thread
         self._spinner.show()
+        if hasattr(self, "_status_label"):
+            self._status_label.setText("جارٍ قصّ الهويات بالذكاء الاصطناعي...")
+            self._status_label.show()
 
     def _on_drop_batch(self, paths):
 
@@ -2218,9 +2377,12 @@ class A4Editor(QWidget):
 
 
 
-    def _on_card_buffer_ready(self, buf):
+    def _on_card_buffer_ready(self, buf, corners=None):
 
 
+
+        if not buf:
+            return  # الوكيل رفض القص — لا تُوضع البطاقة إطلاقاً
 
         qpix = QPixmap()
 
@@ -2230,20 +2392,22 @@ class A4Editor(QWidget):
 
 
 
-            self._place_card(qpix)
-
-
-
-
+            self._place_card(qpix, detect_corners=corners)
     def _on_original_buffer_ready(self, buf):
+
+
+
         qpix = QPixmap()
         if qpix.loadFromData(buf) and self.cards:
+
             self.cards[-1]._original_pixmap = qpix
 
     def _show_original_image(self, card_item):
-        if card_item._original_pixmap is None or card_item._original_pixmap.isNull():
-            return
         original_pix = card_item._original_pixmap
+        if original_pix is None or original_pix.isNull():
+            original_pix = card_item.pixmap()
+        if original_pix is None or original_pix.isNull():
+            return
         card_idx = card_item.index
         dlg = QDialog(self)
         dlg.setWindowTitle("قص يدوي")
@@ -2258,12 +2422,39 @@ class A4Editor(QWidget):
         preview_label.setAlignment(Qt.AlignCenter)
         preview_label.setStyleSheet("background:#1a1a1a;border-radius:8px;")
         preview_label.hide()
-        v_layout.addWidget(overlay, 1)
-        v_layout.addWidget(preview_label, 1)
+
+        content_row = QHBoxLayout()
+        left_col = QVBoxLayout()
+        left_col.setContentsMargins(0, 0, 0, 0)
+        left_col.addWidget(overlay, 1)
+        left_col.addWidget(preview_label, 1)
+        content_row.addLayout(left_col, 1)
+        v_layout.addLayout(content_row, 1)
+
+        slider_box = QVBoxLayout()
+        brightness_label = QLabel("سطوع")
+        brightness_label.setAlignment(Qt.AlignCenter)
+        brightness_label.setStyleSheet("color:#ccc;font-weight:bold;font-size:11px;")
+        slider_box.addWidget(brightness_label)
+        brightness_slider = QSlider(Qt.Vertical)
+        brightness_slider.setRange(-100, 100)
+        brightness_slider.setValue(getattr(card_item, "_last_brightness", 0))
+        brightness_slider.setFixedHeight(340)
+        brightness_slider.setTickPosition(QSlider.TickPosition.TicksLeft)
+        brightness_slider.setStyleSheet(
+            "QSlider::groove:vertical{background:#444;width:6px;border-radius:3px;}"
+            "QSlider::handle:vertical{background:#f1c40f;width:18px;height:26px;margin:-8px -6px;border-radius:9px;}"
+        )
+        slider_box.addWidget(brightness_slider, 1, Qt.AlignCenter)
+        slider_box.addStretch()
+        content_row.addLayout(slider_box)
 
         preview_pixmap = [None]
         preview_transforms = [0]
         preview_hflip = [False]
+        brightness = [brightness_slider.value()]
+        brightness_base = [None]
+        display_original = [original_pix]
 
         def _do_crop(pts):
             cropped = self._perspective_crop(original_pix, pts)
@@ -2283,21 +2474,64 @@ class A4Editor(QWidget):
                 p = p.transformed(t, Qt.SmoothTransformation)
             return p
 
-        def _show_preview(cropped):
-            preview_pixmap[0] = cropped
-            overlay.hide()
-            preview_label.show()
-            transformed = _apply_transforms(cropped)
+        def _render_preview():
+            base = brightness_base[0]
+            if base is None:
+                return
+            adjusted = _adjust_brightness_pixmap(base, brightness[0])
+            preview_pixmap[0] = adjusted
+            transformed = _apply_transforms(adjusted)
             scaled = transformed.scaled(preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             preview_label.setPixmap(scaled)
+
+        def _show_preview(cropped):
+            brightness_base[0] = cropped
+            brightness[0] = brightness_slider.value()
+            overlay.hide()
+            preview_label.show()
+            _render_preview()
             _update_buttons(True)
 
         def _show_overlay():
             preview_pixmap[0] = None
+            brightness_base[0] = None
+            brightness[0] = 0
+            brightness_slider.setValue(0)
+            display_original[0] = original_pix
             preview_label.hide()
             overlay.show()
             overlay.clear_points()
             _update_buttons(False)
+
+        def _apply_brightness_overlay(v):
+            brightness[0] = v
+            if brightness_base[0] is not None:
+                _render_preview()
+                return
+            display_original[0] = _adjust_brightness_pixmap(original_pix, v)
+            overlay.set_display(display_original[0], 1.0, 0, 0)
+            overlay.update()
+
+        # تحديث خفيف للسحب: تُدمج إشارات valueChanged في مؤقّت قصير وتبقى
+        # أحدث قيمة فقط — فيتحرك الشريط بنعومة دون أن يثقل إعادة الرسم.
+        _bright_timer = QTimer(dlg)
+        _bright_timer.setInterval(60)
+        _bright_timer.setSingleShot(True)
+        _bright_pending = [None]
+
+        def _bright_schedule(v):
+            _bright_pending[0] = v
+            _bright_timer.start()
+
+        def _bright_flush():
+            if _bright_pending[0] is not None:
+                _apply_brightness_overlay(_bright_pending[0])
+                _bright_pending[0] = None
+
+        _bright_timer.timeout.connect(_bright_flush)
+
+        brightness_slider.valueChanged.connect(_bright_schedule)
+        _apply_brightness_overlay(brightness_slider.value())
 
         btn_row = QHBoxLayout()
         btn_clear = QPushButton("مسح النقاط")
@@ -2368,7 +2602,7 @@ class A4Editor(QWidget):
             btn_hflip.setVisible(in_preview)
             btn_vflip.setVisible(in_preview)
             btn_rotate.setVisible(in_preview)
-            btn_add.setEnabled(in_preview)
+            btn_add.setEnabled(True)
 
         def on_crop():
             try:
@@ -2414,10 +2648,19 @@ class A4Editor(QWidget):
                 preview_label.setPixmap(scaled)
 
         def on_add():
-            if preview_pixmap[0]:
+            if preview_pixmap[0] is not None:
                 final = _apply_transforms(preview_pixmap[0])
-                self._replace_card(card_idx, final)
-                dlg.accept()
+            else:
+                from PySide6.QtGui import QPixmap as _QPixmap
+                current = card_item.pixmap()
+                if current is None or current.isNull():
+                    current = original_pix
+                final = _adjust_brightness_pixmap(current, brightness[0])
+            # تُختم التعديلات الحالية في أصل جديد (bake): يظهر التغيير السابق
+            # عند العودة، ويبدأ الشريط من صفر لمواصلة التعديل دون تراكم مزدوج.
+            card_item._last_brightness = 0
+            self._replace_card(card_idx, final)
+            dlg.accept()
 
         btn_crop.clicked.connect(on_crop)
         btn_hflip.clicked.connect(on_hflip)
@@ -2429,27 +2672,47 @@ class A4Editor(QWidget):
         btn_hflip.hide()
         btn_vflip.hide()
         btn_rotate.hide()
-        btn_add.setEnabled(False)
+        btn_add.setEnabled(True)
 
         def on_resize(event):
-            if preview_pixmap[0]:
-                transformed = _apply_transforms(preview_pixmap[0])
-                scaled = transformed.scaled(preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                preview_label.setPixmap(scaled)
-            elif not original_pix.isNull():
-                overlay.set_display(original_pix, 1.0, 0, 0)
-                scaled = original_pix.scaled(overlay.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            if brightness_base[0] is not None:
+                _render_preview()
+            elif not display_original[0].isNull():
+                overlay.set_display(display_original[0], 1.0, 0, 0)
+                scaled = display_original[0].scaled(overlay.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 sx = overlay.width() - scaled.width()
                 sy = overlay.height() - scaled.height()
-                overlay.set_display(original_pix, scaled.width() / original_pix.width(), sx // 2, sy // 2)
+                overlay.set_display(display_original[0], scaled.width() / display_original[0].width(), sx // 2, sy // 2)
 
-        dlg.resizeEvent = on_resize
+        _resize_pending = [False]
+
+        def _finalize_resize():
+            _resize_pending[0] = False
+            on_resize(None)
+
+        def _schedule_resize(event=None):
+            if not _resize_pending[0]:
+                _resize_pending[0] = True
+                QTimer.singleShot(120, _finalize_resize)
+
+        dlg.resizeEvent = _schedule_resize
         QTimer.singleShot(0, lambda: on_resize(None))
         btn_close.setFocus()
         dlg.exec()
+        card_item._last_brightness = brightness_slider.value()
 
     def _perspective_crop(self, pixmap, points):
+        """القاعدة الثابتة: تحديد الزوايا الأربع الحقيقية ثم warpPerspective.
+
+        - ترتيب الزوايا عبر order_card_corners (نفس قاعدة YOLO): مستقر لأي
+          ميلان حتى ~90° — لا ينقلب أبداً عند 45° كما كانت تقع سابقاً.
+        - warpPerspective حصرياً من النقاط الأربع إلى مستطيل مستقيم أفقي
+          (الناتج كأنه مسحوب بماسح ضوئي: بلا ميلان نهائياً).
+        - فحص استثنائي: ناتج عمودي/نسبة شاذة ⇒ قصّ مستطيل بسيط بهامش 5
+          (لا يُخرج صورة مقلوبة تحت أي ظرف)."""
+        import cv2
         from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+        from core.local_yolo import _landscape_order
         buf = QBuffer()
         buf.open(QIODevice.ReadWrite)
         pixmap.save(buf, "PNG")
@@ -2457,33 +2720,50 @@ class A4Editor(QWidget):
         raw = buf.data().data()
         buf.close()
         arr = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
-        h, w = arr.shape[:2]
-        src = np.array(points, dtype=np.float32)
-        s = src.sum(axis=1)
-        d = np.diff(src, axis=1).flatten()
-        ordered = np.array([
-            src[np.argmin(s)],
-            src[np.argmin(d)],
-            src[np.argmax(s)],
-            src[np.argmax(d)],
-        ], dtype=np.float32)
-        w1 = np.linalg.norm(ordered[0] - ordered[1])
-        w2 = np.linalg.norm(ordered[2] - ordered[3])
-        h1 = np.linalg.norm(ordered[0] - ordered[3])
-        h2 = np.linalg.norm(ordered[1] - ordered[2])
-        dst_w = int(max(w1, w2))
-        dst_h = int(max(h1, h2))
-        if dst_w < 10 or dst_h < 10:
+        if arr is None:
             return pixmap
-        dst = np.array([[0, 0], [dst_w - 1, 0], [dst_w - 1, dst_h - 1], [0, dst_h - 1]], dtype=np.float32)
-        M = cv2.getPerspectiveTransform(ordered, dst)
-        cropped_arr = cv2.warpPerspective(arr, M, (dst_w, dst_h))
-        cropped_arr = cv2.cvtColor(cropped_arr, cv2.COLOR_BGR2RGB)
+        h, w = arr.shape[:2]
+        pts = np.array([(p.x(), p.y()) if hasattr(p, "x") else (p[0], p[1])
+                        for p in points], dtype=np.float32).reshape(4, 2)
+        # ترتيب النقاط الأربع حرفياً كما نقرها المستخدم (TL/TR/BR/BL) —
+        # بلا إعادة بناء عبر minAreaRect كي لا تظهر خلفية خارج المربع المرسوم.
+        ordered = _landscape_order(pts)
+
+        (tl, tr, br, bl) = ordered
+        w_top = np.linalg.norm(tr - tl)
+        w_bot = np.linalg.norm(br - bl)
+        h_lft = np.linalg.norm(bl - tl)
+        h_rgt = np.linalg.norm(br - tr)
+        dst_w = int(max(w_top, w_bot))
+        dst_h = int(max(h_lft, h_rgt))
+        aspect = (dst_w / dst_h) if dst_h > 0 else 0.0
+
+        # فحص استثنائي: ناتج عمودي أو نسبة بعيدة عن بطاقة الهوية — قصّ بسيط آمن
+        if dst_w < 10 or dst_h < 10 or dst_w < dst_h or not (1.1 <= aspect <= 2.6):
+            try:
+                x, y, bw, bh = cv2.boundingRect(pts.astype(np.int32).reshape(-1, 1, 2))
+                pad = 5
+                x0, y0 = max(0, x - pad), max(0, y - pad)
+                x1, y1 = min(w, x + bw + pad), min(h, y + bh + pad)
+                if x1 - x0 < 2 or y1 - y0 < 2:
+                    return pixmap
+                box_arr = arr[y0:y1, x0:x1]
+            except Exception:
+                return pixmap
+        else:
+            dst_w = int(round(dst_w * 1.015))
+            dst_h = int(round(dst_h * 1.015))
+            dst = np.array([[0, 0], [dst_w - 1, 0],
+                            [dst_w - 1, dst_h - 1], [0, dst_h - 1]], dtype=np.float32)
+            M = cv2.getPerspectiveTransform(ordered, dst)
+            box_arr = cv2.warpPerspective(arr, M, (dst_w, dst_h))
+
+        box_arr = cv2.cvtColor(box_arr, cv2.COLOR_BGR2RGB)
         ch = 3
-        h2, w2 = cropped_arr.shape[:2]
+        h2, w2 = box_arr.shape[:2]
         bytes_per_line = ch * w2
         from PySide6.QtGui import QImage as QImg
-        qimg = QImg(cropped_arr.data.tobytes(), w2, h2, bytes_per_line, QImg.Format.Format_RGB888)
+        qimg = QImg(box_arr.data.tobytes(), w2, h2, bytes_per_line, QImg.Format.Format_RGB888)
         return QPixmap.fromImage(qimg)
 
     def _replace_card(self, card_idx, new_pixmap):
@@ -2491,23 +2771,20 @@ class A4Editor(QWidget):
             return
         item = self.cards[card_idx]
         old_pos = item.pos()
-        old_scale = item._scale
         old_rotation = item._rotation
-        old_snapped = item._snapped
-        old_pan_x = item._pan_x
-        old_pan_y = item._pan_y
-        old_original = item._original_pixmap
+        old_brightness = getattr(item, "_last_brightness", 0)
         self.scene.removeItem(item)
         new_item = IDCardItem(new_pixmap, index=card_idx)
         new_item.on_dropped = self._on_card_dropped
         new_item.on_double_clicked = self._show_original_image
-        new_item._original_pixmap = old_original
+        new_item.on_sakan_toggled = self._reflow_page_layouts
+        new_item._sakan_center_x = A4_W / 2.0
+        new_item.attach_action_button(lambda checked=False, item=new_item: item.toggle_sakan_size())
+        new_item._original_pixmap = new_pixmap
+        new_item._last_brightness = old_brightness
         new_item.setPos(old_pos)
         new_item._rotation = old_rotation
-        new_item._scale = old_scale
-        new_item._snapped = old_snapped
-        new_item._pan_x = old_pan_x
-        new_item._pan_y = old_pan_y
+        new_item.set_item_scale(1.0, snap=True)
         self.scene.addItem(new_item)
         self.cards[card_idx] = new_item
 
@@ -2517,11 +2794,44 @@ class A4Editor(QWidget):
 
 
 
+    def _recenter_status(self):
+
+        if not hasattr(self, "_status_label") or not self.view:
+
+            return
+
+        self._status_label.adjustSize()
+
+        self._status_label.move(
+
+            (self.view.width() - self._status_label.width()) // 2,
+
+            self._spinner.y() + self._spinner.height() + 10,
+
+        )
+
+    def _on_ai_status(self, text):
+
+        if not hasattr(self, "_status_label"):
+
+            return
+
+        self._status_label.setText(text)
+
+        self._status_label.adjustSize()
+
+        self._recenter_status()
+
+        self._status_label.show()
+
     def _on_processing_done(self):
 
 
 
         self._spinner.hide()
+
+        if hasattr(self, "_status_label"):
+            self._status_label.hide()
 
 
 
@@ -2531,156 +2841,37 @@ class A4Editor(QWidget):
 
 
 
-
-
     def add_image(self, path_or_bytes):
-
-
-
-        import numpy as np
-
-
-
-        from core.id_extractor import extract_card
-
-
-
-        from core.image_utils import resize_to_card
-
-
-
-        from core.photo_processor import auto_crop_subject
-
-
+        from core.ai_agent import ai_cut_card
 
         try:
-
-
-
             if isinstance(path_or_bytes, str):
-
-
-
                 pil = Image.open(path_or_bytes)
-
-
-
             else:
-
-
-
                 pil = Image.open(io.BytesIO(path_or_bytes))
 
-
-
             if self.btn_nocrop.isChecked():
-
-
-
-                pil = pil.convert("RGB")
-
-
-
-                extracted = pil
-
-
-
-            elif pil.mode == "RGBA":
-
-
-
-                alpha = np.array(pil.split()[-1])
-
-
-
-                transparent_ratio = np.sum(alpha < 128) / alpha.size
-
-
-
-                if transparent_ratio > 0.05:
-
-
-
-                    pil = pil.convert("RGB")
-
-
-
-                    extracted = pil
-
-
-
-                else:
-
-
-
-                    pil = pil.convert("RGB")
-
-
-
-                    extracted = extract_card(pil)
-
-
-
-                    extracted = auto_crop_subject(extracted)
-
-
-
+                result = pil.convert("RGB")
             else:
+                result = ai_cut_card(pil)
 
-
-
-                pil = pil.convert("RGB")
-
-
-
-                extracted = extract_card(pil)
-
-
-
-                extracted = auto_crop_subject(extracted)
-
-
-
-            resized = resize_to_card(extracted)
-
-
+            if result is None:
+                QMessageBox.warning(self, "تعذّر القصّ",
+                                    "لم يتعرّف الوكيل المحلي على البطاقة — لم تُقصّ الصورة.")
+                return
 
             buf = io.BytesIO()
-
-
-
-            resized.save(buf, format="PNG")
-
-
-
+            result.save(buf, format="PNG")
             buf.seek(0)
 
-
-
             qpix = QPixmap()
-
-
-
             if not qpix.loadFromData(buf.getvalue()):
-
-
-
-                raise ValueError("ظظ¾شظâ€‍ طع¾حظâ€¦ظظ¹ظâ€‍ اظâ€‍صظث†رة اظâ€‍ظâ€¦عاظâ€‍جة")
-
-
+                raise ValueError("فشل تحميل الصورة المعالجة")
 
             self._place_card(qpix)
 
-
-
         except Exception as e:
-
-
-
-            logger.error("ظظ¾شظâ€‍ إضاظظ¾ة اظâ€‍صظث†رة", exc_info=True)
-
-
-
+            logger.error("فشل إضافة الصورة", exc_info=True)
             QMessageBox.warning(self, "خطأ", f"فشل تحميل الصورة: {e}")
 
 
@@ -2688,6 +2879,63 @@ class A4Editor(QWidget):
 
 
 
+
+    def _on_selection_changed(self):
+        for card in self.cards:
+            card.show_action_button(card.isSelected())
+
+    def _make_card_large(self, item):
+        """تبديل حجم مستطيل البطاقة بين الأصلي و 9.8×6سم."""
+        item.toggle_sakan_size()
+
+    def _reflow_page_layouts(self):
+        """إعادة ترتيب البطاقات في كل صفحة حتى لا يلتصق المستطيل المكبّر بمجاوراته.
+
+        عند تكبير بطاقة إلى 98×60، يزيد ارتفاع صفّها، فتُنثنى الفراغات الرأسية
+        تلقائياً ليبقى هناك مسافة إيجابية بين كل صف والآخر. وتبقى المسافات
+        الحالية (ROW_GAP) كما هي تماماً عندما لا توجد أي بطاقة مكبّرة.
+        """
+        if not self.cards:
+            return
+        avail_h = A4_H - 2 * MARGIN
+        for page_idx in range(self._num_pages):
+            page_start = page_idx * MAX_CARDS
+            page_end = page_start + MAX_CARDS
+            in_page = [c for c in self.cards if page_start <= c.index < page_end]
+            if not in_page:
+                continue
+            rows = {}
+            for c in in_page:
+                local = c.index % MAX_CARDS
+                row = local // CARDS_PER_ROW
+                h = float(c.card_size_mm()[1])
+                rows[row] = max(rows.get(row, CARD_H), h)
+            row_ids = sorted(rows.keys())
+            if not row_ids:
+                continue
+            any_large = any(getattr(c, "_sakan_large", False) for c in in_page)
+            sum_h = sum(rows[r] for r in row_ids)
+            n_gaps = max(0, len(row_ids) - 1)
+            gap = ROW_GAP
+            if any_large and n_gaps > 0:
+                available = avail_h - sum_h
+                gap = min(ROW_GAP, max(0.5, available / n_gaps))
+            y = page_idx * A4_H + MARGIN
+            y_of_row = {}
+            for r in row_ids:
+                y_of_row[r] = y
+                y += rows[r] + gap
+            for c in in_page:
+                local = c.index % MAX_CARDS
+                col = local % CARDS_PER_ROW
+                row = local // CARDS_PER_ROW
+                w = float(c.card_size_mm()[0])
+                x = self._col_x(col)
+                if getattr(c, "_sakan_large", False):
+                    x = max(MARGIN, min(x, A4_W - MARGIN - w))
+                c.setPos(x, y_of_row[row])
+                c._snapped = True
+                c._position_action_button()
 
     def _grid_pos(self, idx):
 
@@ -2713,7 +2961,7 @@ class A4Editor(QWidget):
 
 
 
-        x = MARGIN + col * (CARD_W + COL_GAP)
+        x = self._col_x(col)
 
 
 
@@ -2729,11 +2977,33 @@ class A4Editor(QWidget):
 
 
 
-    def _place_card(self, pixmap: QPixmap):
+
+    def _find_first_free_slot(self, start_page=0):
+        total_slots = MAX_CARDS * max(1, self._num_pages)
+        for idx in range(start_page * MAX_CARDS, total_slots):
+            gx, gy = self._grid_pos(idx)
+            cx, cy = gx + CARD_W / 2.0, gy + CARD_H / 2.0
+            blocked = False
+            for other in self.cards:
+                ow, oh = other.card_size_mm()
+                ox, oy = other.pos().x(), other.pos().y()
+                if cx >= ox and cx <= ox + ow and cy >= oy and cy <= oy + oh:
+                    blocked = True
+                    break
+            if not blocked:
+                self._ensure_page(idx // MAX_CARDS)
+                return idx
+        idx = total_slots
+        self._ensure_page(idx // MAX_CARDS)
+        return idx
 
 
 
-        idx = len(self.cards)
+    def _place_card(self, pixmap: QPixmap, detect_corners=None):
+
+
+
+        idx = self._find_first_free_slot()
 
 
 
@@ -2741,17 +3011,21 @@ class A4Editor(QWidget):
 
 
 
-        item = IDCardItem(pixmap, index=idx)
+        item = IDCardItem(pixmap, index=idx, detect_corners=detect_corners)
 
 
 
         item.on_dropped = self._on_card_dropped
         item.on_double_clicked = self._show_original_image
+        item.on_sakan_toggled = self._reflow_page_layouts
+        item._sakan_center_x = A4_W / 2.0
+        item.attach_action_button(lambda checked=False, item=item: item.toggle_sakan_size())
 
 
 
         item.setPos(*self._grid_pos(idx))
 
+        item._position_action_button()
 
 
         item.set_item_scale(1.0, snap=True)
@@ -2762,16 +3036,19 @@ class A4Editor(QWidget):
 
 
 
-        self.cards.append(item)
+        ins = 0
+        for c in self.cards:
+            if c.index <= idx:
+                try:
+                    ins = self.cards.index(c) + 1
+                except Exception:
+                    pass
+        self.cards.insert(ins, item)
+
+        item._original_pixmap = pixmap
 
 
-
-        logger.info("طع¾ظâ€¦طع¾ إضاظظ¾ة اظâ€‍بطاظâ€ڑة %d (صظظ¾حة %d)", len(self.cards), idx // MAX_CARDS + 1)
-
-
-
-
-
+        return item
 
 
     def _on_card_dropped(self, item):
@@ -2834,38 +3111,53 @@ class A4Editor(QWidget):
             self._snap_card_to_nearest(item, center)
 
     def _snap_card_to_nearest(self, item, center):
+        """إرساء البطاقة على أقرب خانة حرة في صفحتها الحالية.
 
-        drop_page = int(center.y() // A4_H)
-
-        best_idx = 0
-
-        best_dist = float('inf')
-
+        تُحدَّد الصفحة من موضع البطاقة (أعلى-يسار) لا من مركزها حتى لا تقفز
+        بطاقة الصف الأخير إلى الصفحة التالية عند ميلان بسيط أثناء نقلها
+        أفقياً. تُختار أقرب خانة لا تحوي بطاقة أخرى فلا يحدث تراكب ولا انتزاع
+        لجارة، ثم يُسند الفهرس للبطاقة وتُعاد صفوف الصفحة بالحجوم الفعلية
+        (الجزء الذي تركته بطاقة مكبّرة ينكمش ويعود طبيعياً).
+        """
+        drop_page = max(0, min(self._num_pages - 1, int(item.pos().y() / A4_H)))
+        self._ensure_page(drop_page)
         total_slots = MAX_CARDS * self._num_pages
-
+        free = []
         for i in range(total_slots):
-
             gx, gy = self._grid_pos(i)
-
-            card_page = int(gy // A4_H)
-
-            if card_page != drop_page:
-
+            if int(gy / A4_H) != drop_page:
                 continue
-
-            dx = center.x() - (gx + CARD_W / 2)
-
-            dy = center.y() - (gy + CARD_H / 2)
-
-            d = dx * dx + dy * dy
-
-            if d < best_dist:
-
-                best_dist = d
-
-                best_idx = i
-
+            cx, cy = gx + CARD_W / 2.0, gy + CARD_H / 2.0
+            blocked = False
+            for other in self.cards:
+                if other is item:
+                    continue
+                ow, oh = other.card_size_mm()
+                ox, oy = other.pos().x(), other.pos().y()
+                if cx < ox or cx > ox + ow or cy < oy or cy > oy + oh:
+                    continue
+                blocked = True
+                break
+            if not blocked:
+                dx = center.x() - (gx + CARD_W / 2)
+                dy = center.y() - (gy + CARD_H / 2)
+                free.append((dx * dx + dy * dy, i))
+        if not free:
+            self._constrain_card(item)
+            return
+        _, best_idx = min(free)
+        if item.index != best_idx:
+            item.index = best_idx
+            if item in self.cards:
+                self.cards.remove(item)
+            ins = 0
+            for c in self.cards:
+                if c.index <= best_idx:
+                    ins = self.cards.index(c) + 1
+            self.cards.insert(ins, item)
         item.setPos(*self._grid_pos(best_idx))
+        self._reflow_page_layouts()
+        self._constrain_card(item)
 
 
 
@@ -2893,6 +3185,7 @@ class A4Editor(QWidget):
 
         a.index = j
         b.index = i
+        self._reflow_page_layouts()
 
 
         logger.info("طع¾ظâ€¦ طع¾بدظظ¹ظâ€‍ اظâ€‍بطاظâ€ڑطع¾ظظ¹ظâ€  %d ظث† %d", i + 1, j + 1)
@@ -2902,6 +3195,78 @@ class A4Editor(QWidget):
 
 
 
+
+    def _constrain_card(self, item):
+        """قيّد موضع بطاقة مكبّرة داخل حدود الصفحة ومنع تراكبها مع المجاورات.
+
+        البطاقة الكبيرة (98×60 عبر سكن) بعد سحبها قد تتجاوز حافة الورقة
+        اليمنى أو تتراكب مع البطاقة التي تحتها (الشبكة مبنية لمقاس 90×55).
+        نقيّد x ضمن حدود الصفحة، ونزاح عمودياً حتى لا يوجد تداخل مع أي
+        بطاقة أخرى في نفس الصفحة.
+        """
+        w, h = item.card_size_mm()
+        p = item.pos()
+        page = int(p.y() // A4_H)
+        lo_y = page * A4_H + MARGIN
+        hi_y = page * A4_H + (A4_H - MARGIN - h)
+        x = max(MARGIN, min(p.x(), A4_W - MARGIN - w))
+        y = max(lo_y, min(p.y(), hi_y))
+
+        def overlaps(cx, cy, cw, ch):
+            for other in self.cards:
+                if other is item or int(round(other.pos().y() / A4_H)) != page:
+                    continue
+                ow, oh = other.card_size_mm()
+                ox, oy = other.pos().x(), other.pos().y()
+                if cx + cw <= ox + 0.01 or cx >= ox + ow - 0.01:
+                    continue
+                if cy + ch <= oy + 0.01 or cy >= oy + oh - 0.01:
+                    continue
+                return True
+            return False
+
+        guard = 0
+        while guard < 10 and overlaps(x, y, w, h):
+            guard += 1
+            oy = None
+            for other in self.cards:
+                if other is item or int(round(other.pos().y() / A4_H)) != page:
+                    continue
+                ow, oh = other.card_size_mm()
+                ox, ooy = other.pos().x(), other.pos().y()
+                if x + w <= ox + 0.01 or x >= ox + ow - 0.01:
+                    continue
+                if y + h <= ooy + 0.01 or y >= ooy + oh - 0.01:
+                    continue
+                oy = ooy
+                break
+            if oy is None:
+                break
+            if oy >= y:
+                ny = oy - h - ROW_GAP
+            else:
+                ny = oy + oh + ROW_GAP
+            ny = max(lo_y, min(ny, hi_y))
+            if abs(ny - y) < 0.01:
+                break
+            y = ny
+        # إن بقي تداخل (مثل صف ممتلئ أفقياً بعد تبديل): ننقل البطاقة إلى
+        # أقرب صف خالٍ في نفس الصفحة حيث لا تتصادم مع أي بطاقة أخرى.
+        if overlaps(x, y, w, h):
+            candidates = set(MARGIN + r * (CARD_H + ROW_GAP) for r in range(MAX_ROWS))
+            candidates.add(A4_H - MARGIN - h)
+            best_y, best_d = None, None
+            for yy in candidates:
+                yy = max(lo_y, min(yy, hi_y))
+                if overlaps(x, yy, w, h):
+                    continue
+                d = abs(yy - y)
+                if best_y is None or d < best_d:
+                    best_y, best_d = yy, d
+            if best_y is not None:
+                y = best_y
+        item.setPos(x, y)
+        item._position_action_button()
 
     def clear_all(self):
 
@@ -3020,7 +3385,8 @@ class A4Editor(QWidget):
             if pt:
                 set_last_paper_type(pt)
             print_scene(self, self.scene, copies=copies, page_count=self._num_pages, duplex=duplex,
-                        page_range=dialog.page_range(), paper_type=pt)
+                        page_range=dialog.page_range(), paper_type=pt,
+                        back_offset_dx_mm=dialog.back_offset_dx(), back_offset_dy_mm=dialog.back_offset_dy())
 
 
 
@@ -3032,13 +3398,46 @@ class A4Editor(QWidget):
 
                 it.setVisible(True)
 
+                for item in selected:
 
 
-            for item in selected:
 
 
 
-                item.setSelected(True)
+                    item.setSelected(True)
+
+    def save_images(self):
+        if not self.cards:
+            QMessageBox.information(self, "تنبيه", "لا توجد بطاقات للحفظ.")
+            return
+
+        folder = QFileDialog.getExistingDirectory(self, "اختر مجلد حفظ الصور")
+        if not folder:
+            return
+
+        if not getattr(self, 'subscription_check', lambda: True)():
+            return
+
+        saved = 0
+        for i, card in enumerate(self.cards, start=1):
+            pix = card.pixmap()
+            if pix is None or pix.isNull():
+                continue
+            base = "هوية_%d" % i
+            path = os.path.join(folder, base + ".png")
+            n = 2
+            while os.path.exists(path):
+                path = os.path.join(folder, "%s_%d.png" % (base, n))
+                n += 1
+            try:
+                if pix.save(path, "PNG"):
+                    saved += 1
+            except Exception as e:
+                logger.warning("فشل حفظ الصورة %d: %s", i, e)
+        if saved:
+            QMessageBox.information(self, "تم", "حُفظت %d صورة في:\n%s" % (saved, folder))
+        else:
+            QMessageBox.warning(self, "تنبيه", "لم تُحفظ أي صورة.")
 
 
 

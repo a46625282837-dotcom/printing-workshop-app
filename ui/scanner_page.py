@@ -21,9 +21,9 @@ from ui.a4_editor import PrintSetupDialog
 
 logger = logging.getLogger(__name__)
 
-A4_W = 595
-A4_H = 842
-MARGIN = 5
+A4_W = 2480
+A4_H = 3508
+MARGIN = 25
 
 _HANDLE_SIZE = 16
 _CROP_COLOR = QColor("#FF5722")
@@ -150,7 +150,7 @@ class _ScanView(QGraphicsView):
             p.wheelEvent(event)
 
 
-def _layout_images_on_scene(scene, images, page_num, total_pages, multi_scan=False, img_positions=None, img_scales=None, display_cache=None):
+def _layout_images_on_scene(scene, images, page_num, total_pages, multi_scan=False, img_positions=None, img_scales=None, display_cache=None, img_mm_sizes=None):
     scene.addRect(0, 0, A4_W, A4_H, QPen(QColor("#cccccc")), QColor("white"))
     aw = A4_W - 2 * MARGIN
     ah = A4_H - 2 * MARGIN
@@ -189,6 +189,11 @@ def _layout_images_on_scene(scene, images, page_num, total_pages, multi_scan=Fal
                 scale = img_scales[key]
             scaled_w = max(10, int(half_w * scale))
             scaled_h = max(10, int(ah * scale))
+            if img_mm_sizes and key in img_mm_sizes:
+                w_mm, h_mm = img_mm_sizes[key]
+                scale_x = A4_W / 210.0
+                scaled_w = max(10, int(round(w_mm * scale_x)))
+                scaled_h = max(10, int(round(h_mm * scale_x)))
             scaled = _scaled(qimg, scaled_w, scaled_h, key)
             item = scene.addPixmap(scaled)
             item.setFlag(QGraphicsPixmapItem.ItemIsMovable, True)
@@ -229,6 +234,7 @@ class ScannerPage(QWidget):
         self._current_tool = "select"
         self._img_positions = {}
         self._img_scales = {}
+        self._img_mm_sizes = {}
         self._reordering = False
         self._copied_image = None
         self._undo_stack = []
@@ -446,9 +452,21 @@ class ScannerPage(QWidget):
         zoom_row.addWidget(btn_img_reset)
         self._btn_img_reset = btn_img_reset
 
+        btn_img_95 = QPushButton("9×5.5 سم")
+        btn_img_95.setFixedHeight(30)
+        btn_img_95.setStyleSheet(
+            "QPushButton{background:#009688;color:white;font-weight:bold;padding:0 10px;border:none;border-radius:4px;}"
+            "QPushButton:hover{background:#00796B;}"
+        )
+        btn_img_95.setToolTip("ضبط حجم الصورة المحددة إلى 9 سم عرضاً و 5.5 سم ارتفاعاً")
+        btn_img_95.clicked.connect(lambda: self._resize_selected_image_mm(90.0, 55.0))
+        zoom_row.addWidget(btn_img_95)
+        self._btn_img_95 = btn_img_95
+
         self._btn_img_minus.setVisible(False)
         self._btn_img_plus.setVisible(False)
         self._btn_img_reset.setVisible(False)
+        self._btn_img_95.setVisible(False)
 
         zoom_row.addStretch()
         layout.addLayout(zoom_row)
@@ -603,6 +621,7 @@ class ScannerPage(QWidget):
         self._btn_img_minus.setVisible(self._multi_scan)
         self._btn_img_plus.setVisible(self._multi_scan)
         self._btn_img_reset.setVisible(self._multi_scan)
+        self._btn_img_95.setVisible(self._multi_scan)
         self._update_paper()
         logger.info("وضع التصوير المتعدد: %s", "مفعّل" if self._multi_scan else "معطّل")
 
@@ -1011,6 +1030,7 @@ class ScannerPage(QWidget):
         self._images[from_gidx], self._images[to_gidx] = self._images[to_gidx], self._images[from_gidx]
         self._img_positions.clear()
         self._img_scales.clear()
+        self._img_mm_sizes.clear()
         if from_gidx in self._thumb_widgets and to_gidx in self._thumb_widgets:
             self._swap_card_thumbs(from_gidx, to_gidx)
         else:
@@ -1035,6 +1055,8 @@ class ScannerPage(QWidget):
             return
         local_idx = page_gidxs.index(self._selected_idx)
         key = (self._current_page, local_idx)
+        if direction == 0:
+            self._img_mm_sizes.pop(key, None)
         cur = self._img_scales.get(key, 1.0)
         if direction == 0:
             new_scale = 1.0
@@ -1067,6 +1089,35 @@ class ScannerPage(QWidget):
                             old_pos.y() + (old_h - new_pix.height()) / 2)
                 self._img_positions[key] = item.pos()
 
+    def _resize_selected_image_mm(self, w_mm, h_mm):
+        if not self._multi_scan:
+            return
+        page_gidxs = self._page_image_indices(self._current_page)
+        if self._selected_idx not in page_gidxs:
+            return
+        local_idx = page_gidxs.index(self._selected_idx)
+        key = (self._current_page, local_idx)
+        self._img_mm_sizes[key] = (w_mm, h_mm)
+        self._img_scales.pop(key, None)
+        items = [it for it in self._scene.items()
+                 if isinstance(it, QGraphicsPixmapItem) and it.data(0) == key]
+        if items:
+            item = items[0]
+            qimg = self._images[self._selected_idx]
+            if not qimg.isNull():
+                scale_x = A4_W / 210.0
+                target_w = max(10, int(round(w_mm * scale_x)))
+                target_h = max(10, int(round(h_mm * scale_x)))
+                pix = QPixmap.fromImage(qimg)
+                new_pix = pix.scaled(target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                old_pos = item.pos()
+                old_w = item.pixmap().width()
+                old_h = item.pixmap().height()
+                item.setPixmap(new_pix)
+                item.setPos(old_pos.x() + (old_w - new_pix.width()) / 2,
+                            old_pos.y() + (old_h - new_pix.height()) / 2)
+                self._img_positions[key] = item.pos()
+
     def _display_cache(self):
         c = getattr(self, "_display_cache_store", None)
         if c is None:
@@ -1080,7 +1131,7 @@ class ScannerPage(QWidget):
         _layout_images_on_scene(self._scene, page_images,
                                 self._current_page, self._total_pages(),
                                 self._multi_scan, self._img_positions, self._img_scales,
-                                self._display_cache())
+                                self._display_cache(), self._img_mm_sizes)
         self._scene.setSceneRect(0, 0, A4_W, A4_H)
         self._scene.update()
         self._view.viewport().update()
@@ -1090,7 +1141,7 @@ class ScannerPage(QWidget):
         page_images = self._page_images(page_num)
         _layout_images_on_scene(s, page_images, page_num, self._total_pages(),
                                 self._multi_scan, self._img_positions, self._img_scales,
-                                self._display_cache())
+                                self._display_cache(), self._img_mm_sizes)
         return s
 
     def _fit_view(self):
@@ -1178,11 +1229,11 @@ class ScannerPage(QWidget):
         if not path:
             return
         try:
-            printer = QPrinter(QPrinter.ScreenResolution)
+            printer = QPrinter(QPrinter.HighResolution)
             printer.setOutputFormat(QPrinter.PdfFormat)
             printer.setOutputFileName(path)
             printer.setPageSize(QPageSize(QPageSize.A4))
-            printer.setResolution(96)
+            printer.setResolution(300)
             pw = printer.width()
             ph = printer.height()
             p2 = QPainter()
